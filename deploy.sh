@@ -187,9 +187,13 @@ check_prerequisites() {
         exit 1
     fi
     
-    # Check npm
-    if ! command -v npm &> /dev/null; then
-        log_error "npm is not installed."
+    # Check for bun or npm (prefer bun)
+    if command -v bun &> /dev/null; then
+        log_info "bun is installed"
+    elif command -v npm &> /dev/null; then
+        log_info "npm is installed (bun not found, using npm)"
+    else
+        log_error "Neither bun nor npm is installed. Please install bun (preferred) or npm."
         exit 1
     fi
     
@@ -253,10 +257,15 @@ install_dependencies() {
         rm -rf node_modules
     fi
     
-    # Option to force npm cache clean (set CLEAN_NPM_CACHE=true to enable)
-    if [ "${CLEAN_NPM_CACHE:-false}" = "true" ]; then
-        log_info "Clearing npm cache (CLEAN_NPM_CACHE=true)..."
-        npm cache clean --force 2>/dev/null || true
+    # Option to force cache clean (set CLEAN_CACHE=true to enable)
+    if [ "${CLEAN_CACHE:-false}" = "true" ]; then
+        if command -v bun &> /dev/null; then
+            log_info "Clearing bun cache (CLEAN_CACHE=true)..."
+            bun pm cache rm 2>/dev/null || true
+        elif command -v npm &> /dev/null; then
+            log_info "Clearing npm cache (CLEAN_CACHE=true)..."
+            npm cache clean --force 2>/dev/null || true
+        fi
     fi
     
     # Function to attempt installation with cleanup on failure
@@ -270,9 +279,14 @@ install_dependencies() {
                 log_warn "Installation failed, cleaning and retrying (attempt $((retry + 1))/$max_retries)..."
                 # Clean node_modules
                 rm -rf node_modules
-                # Clean npm cache on retry to fix esbuild binary issues
-                log_info "Clearing npm cache to resolve binary version conflicts..."
-                npm cache clean --force 2>/dev/null || true
+                # Clean cache on retry to fix binary issues
+                if command -v bun &> /dev/null; then
+                    log_info "Clearing bun cache to resolve binary version conflicts..."
+                    bun pm cache rm 2>/dev/null || true
+                elif command -v npm &> /dev/null; then
+                    log_info "Clearing npm cache to resolve binary version conflicts..."
+                    npm cache clean --force 2>/dev/null || true
+                fi
             fi
             
             # Run the install command
@@ -286,8 +300,15 @@ install_dependencies() {
         return 1
     }
     
-    # Check if package-lock.json or bun.lock exists
-    if [ -f "package-lock.json" ]; then
+    # Prefer bun if available, otherwise use npm
+    if command -v bun &> /dev/null; then
+        log_info "Using bun install..."
+        if ! bun install; then
+            log_error "Failed to install dependencies with bun"
+            log_error "Troubleshooting: Try running manually: bun install"
+            exit 1
+        fi
+    elif [ -f "package-lock.json" ]; then
         log_info "Using npm ci (clean install from package-lock.json)..."
         if ! attempt_install "npm ci --production=false"; then
             log_warn "npm ci failed, trying npm install as fallback..."
@@ -296,25 +317,20 @@ install_dependencies() {
                 log_error "Failed to install dependencies after retries"
                 log_error ""
                 log_error "Troubleshooting steps:"
-                log_error "  1. Manually clean npm cache: npm cache clean --force"
+                log_error "  1. Manually clean cache: npm cache clean --force"
                 log_error "  2. Remove node_modules and package-lock.json, then: npm install"
                 log_error "  3. Check Node.js version compatibility (current: $(node -v))"
-                log_error "  4. Try setting CLEAN_NPM_CACHE=true before running deploy.sh"
-                log_error "  5. For esbuild issues, try: rm -rf node_modules && npm cache clean --force && npm install"
+                log_error "  4. Try setting CLEAN_CACHE=true before running deploy.sh"
+                log_error "  5. Consider installing bun for faster installs: curl -fsSL https://bun.sh/install | bash"
                 exit 1
             fi
-        fi
-    elif [ -f "bun.lockb" ] && command -v bun &> /dev/null; then
-        log_info "Using bun install..."
-        if ! bun install; then
-            log_error "Failed to install dependencies with bun"
-            exit 1
         fi
     else
         log_info "Using npm install..."
         if ! attempt_install "npm install"; then
             log_error "Failed to install dependencies after retries"
             log_error "Try running manually: npm cache clean --force && npm install"
+            log_error "Or install bun for faster installs: curl -fsSL https://bun.sh/install | bash"
             exit 1
         fi
     fi
@@ -329,10 +345,17 @@ build_application() {
     
     # Build the Vite client (static files)
     log_info "Building Vite client..."
-    npm run build:client || {
-        log_error "Failed to build Vite client"
-        exit 1
-    }
+    if command -v bun &> /dev/null; then
+        bun run build:client || {
+            log_error "Failed to build Vite client"
+            exit 1
+        }
+    else
+        npm run build:client || {
+            log_error "Failed to build Vite client"
+            exit 1
+        }
+    fi
     
     # Setup server runtime
     # Check if cli.ts exists (server entry point)
@@ -343,9 +366,15 @@ build_application() {
         # Check if tsx is available (install if needed)
         if ! command -v tsx &> /dev/null && ! npx tsx --version &> /dev/null 2>&1; then
             log_info "Installing tsx to run TypeScript directly..."
-            npm install --save-dev tsx || {
-                log_warn "Failed to install tsx, trying npx tsx..."
-            }
+            if command -v bun &> /dev/null; then
+                bun add -d tsx || {
+                    log_warn "Failed to install tsx with bun, trying npx tsx..."
+                }
+            else
+                npm install --save-dev tsx || {
+                    log_warn "Failed to install tsx, trying npx tsx..."
+                }
+            fi
         fi
         
         # Verify tsx works
@@ -355,7 +384,11 @@ build_application() {
             # No build needed - tsx will run TypeScript directly
         else
             log_error "tsx is not available and cannot be installed"
-            log_error "Please install tsx: npm install --save-dev tsx"
+            if command -v bun &> /dev/null; then
+                log_error "Please install tsx: bun add -d tsx"
+            else
+                log_error "Please install tsx: npm install --save-dev tsx"
+            fi
             exit 1
         fi
     else
@@ -454,6 +487,24 @@ module.exports = {
   apps: [{
     name: '$APP_NAME',
     script: '$SERVER_SCRIPT',
+    instances: 1,
+    exec_mode: 'fork',
+    cwd: '$APP_DIR',
+    env: {
+      NODE_ENV: 'production',
+      PORT: $SERVER_PORT
+    },
+    error_file: './logs/pm2-error.log',
+    out_file: './logs/pm2-out.log',
+    log_date_format: 'YYYY-MM-DD HH:mm:ss Z',
+    merge_logs: true,
+    autorestart: true,
+    max_memory_restart: '500M',
+    watch: false
+  }]
+};
+EOF
+    fi
     log_info "PM2 ecosystem file regenerated: $PM2_CONFIG"
     
     # Create logs directory
@@ -474,7 +525,12 @@ restart_server() {
             exit 1
         fi
         if ! command -v tsx &> /dev/null && ! npx tsx --version &> /dev/null 2>&1; then
-            log_error "tsx is not available. Please install it: npm install --save-dev tsx"
+            log_error "tsx is not available."
+            if command -v bun &> /dev/null; then
+                log_error "Please install it: bun add -d tsx"
+            else
+                log_error "Please install it: npm install --save-dev tsx"
+            fi
             exit 1
         fi
         log_info "Using tsx to run TypeScript directly"
