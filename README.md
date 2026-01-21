@@ -135,6 +135,28 @@ cp .env.example .env
 ./deploy.sh
 ```
 
+**Option 3: Non-interactive mode (for CI/CD)**
+```bash
+# Use --yes, -y, or --auto to bypass all confirmation prompts
+./deploy.sh --yes
+
+# Or with environment variables
+NGINX_SITE=your-domain.com ./deploy.sh -y
+```
+
+**Troubleshooting: esbuild version errors**
+
+If you encounter esbuild version mismatch errors during installation:
+```bash
+# Force clean npm cache before deployment
+CLEAN_NPM_CACHE=true ./deploy.sh
+
+# Or manually clean and retry
+npm cache clean --force
+rm -rf node_modules
+npm install
+```
+
 The `.env.example` file shows all available configuration options.
 
 **Note**: 

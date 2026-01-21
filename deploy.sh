@@ -16,6 +16,12 @@
 # 
 # The script will automatically load variables from a .env file if present.
 # 
+# USAGE:
+#   ./deploy.sh              # Interactive mode (prompts for confirmation)
+#   ./deploy.sh --yes       # Non-interactive mode (auto-confirms all prompts)
+#   ./deploy.sh -y          # Short form of --yes
+#   ./deploy.sh --auto      # Alias for --yes
+# 
 # SECURITY WARNING:
 # This script requires sudo privileges and modifies system files (/etc/nginx/).
 # Only run this script on servers you control and trust.
@@ -31,6 +37,37 @@
 
 set -e  # Exit on any error
 # Note: set -u is deferred until after .env loading to allow optional variables
+
+# Parse command line arguments
+AUTO_CONFIRM=false
+while [[ $# -gt 0 ]]; do
+    case $1 in
+        -y|--yes|--auto)
+            AUTO_CONFIRM=true
+            shift
+            ;;
+        -h|--help)
+            echo "Usage: $0 [OPTIONS]"
+            echo ""
+            echo "Options:"
+            echo "  -y, --yes, --auto    Auto-confirm all prompts (useful for CI/CD)"
+            echo "  -h, --help           Show this help message"
+            echo ""
+            echo "Environment variables:"
+            echo "  NGINX_SITE (required) - Your domain name"
+            echo "  SERVER_PORT (optional) - Server port (default: 3000)"
+            echo "  APP_NAME (optional) - App name (default: seed-protocol-feed)"
+            echo ""
+            echo "The script will also load variables from a .env file if present."
+            exit 0
+            ;;
+        *)
+            echo "Unknown option: $1" >&2
+            echo "Use -h or --help for usage information" >&2
+            exit 1
+            ;;
+    esac
+done
 
 # Colors for output
 RED='\033[0;31m'
@@ -208,22 +245,77 @@ install_dependencies() {
     log_info "Installing dependencies..."
     cd "$APP_DIR"
     
+    # Clean up any existing node_modules to avoid version conflicts
+    # This helps resolve issues like esbuild version mismatches
+    if [ -d "node_modules" ]; then
+        log_info "Cleaning existing node_modules to avoid version conflicts..."
+        rm -rf node_modules
+    fi
+    
+    # Option to force npm cache clean (set CLEAN_NPM_CACHE=true to enable)
+    if [ "${CLEAN_NPM_CACHE:-false}" = "true" ]; then
+        log_info "Clearing npm cache (CLEAN_NPM_CACHE=true)..."
+        npm cache clean --force 2>/dev/null || true
+    fi
+    
+    # Function to attempt installation with cleanup on failure
+    attempt_install() {
+        local install_cmd="$1"
+        local max_retries=2
+        local retry=0
+        
+        while [ $retry -lt $max_retries ]; do
+            if [ $retry -gt 0 ]; then
+                log_warn "Installation failed, cleaning and retrying (attempt $((retry + 1))/$max_retries)..."
+                # Clean node_modules
+                rm -rf node_modules
+                # Clean npm cache on retry to fix esbuild binary issues
+                log_info "Clearing npm cache to resolve binary version conflicts..."
+                npm cache clean --force 2>/dev/null || true
+            fi
+            
+            # Run the install command
+            if eval "$install_cmd"; then
+                return 0
+            fi
+            
+            retry=$((retry + 1))
+        done
+        
+        return 1
+    }
+    
     # Check if package-lock.json or bun.lock exists
     if [ -f "package-lock.json" ]; then
-        npm ci --production=false || {
-            log_error "Failed to install dependencies with npm ci"
-            exit 1
-        }
+        log_info "Using npm ci (clean install from package-lock.json)..."
+        if ! attempt_install "npm ci --production=false"; then
+            log_warn "npm ci failed, trying npm install as fallback..."
+            rm -rf node_modules package-lock.json
+            if ! attempt_install "npm install"; then
+                log_error "Failed to install dependencies after retries"
+                log_error ""
+                log_error "Troubleshooting steps:"
+                log_error "  1. Manually clean npm cache: npm cache clean --force"
+                log_error "  2. Remove node_modules and package-lock.json, then: npm install"
+                log_error "  3. Check Node.js version compatibility (current: $(node -v))"
+                log_error "  4. Try setting CLEAN_NPM_CACHE=true before running deploy.sh"
+                log_error "  5. For esbuild issues, try: rm -rf node_modules && npm cache clean --force && npm install"
+                exit 1
+            fi
+        fi
     elif [ -f "bun.lockb" ] && command -v bun &> /dev/null; then
-        bun install || {
+        log_info "Using bun install..."
+        if ! bun install; then
             log_error "Failed to install dependencies with bun"
             exit 1
-        }
+        fi
     else
-        npm install || {
-            log_error "Failed to install dependencies"
+        log_info "Using npm install..."
+        if ! attempt_install "npm install"; then
+            log_error "Failed to install dependencies after retries"
+            log_error "Try running manually: npm cache clean --force && npm install"
             exit 1
-        }
+        fi
     fi
     
     log_info "Dependencies installed successfully"
@@ -625,12 +717,16 @@ update_nginx_config() {
     
     # Ask for confirmation before modifying
     log_info "The /feed location block is missing from the nginx config"
-    read -p "Do you want to add it automatically? (y/N) " -n 1 -r
-    echo
-    if [[ ! $REPLY =~ ^[Yy]$ ]]; then
-        log_warn "Skipping nginx config update. Please add manually:"
-        print_nginx_location_block
-        return 1
+    if [ "$AUTO_CONFIRM" = true ]; then
+        log_info "Auto-confirm mode: adding /feed location block automatically..."
+    else
+        read -p "Do you want to add it automatically? (y/N) " -n 1 -r
+        echo
+        if [[ ! $REPLY =~ ^[Yy]$ ]]; then
+            log_warn "Skipping nginx config update. Please add manually:"
+            print_nginx_location_block
+            return 1
+        fi
     fi
     
     # Add the location block
@@ -714,14 +810,16 @@ main() {
     log_warn "Only proceed if you trust this script and the repository."
     log_warn "========================================="
     
-    # Allow skipping the warning in CI environments
-    if [ -z "${CI:-}" ] || [ "${CI:-}" != "true" ]; then
+    # Allow skipping the warning in CI environments or with --yes flag
+    if [ "$AUTO_CONFIRM" = false ] && ([ -z "${CI:-}" ] || [ "${CI:-}" != "true" ]); then
         read -p "Continue with deployment? (y/N) " -n 1 -r
         echo
         if [[ ! $REPLY =~ ^[Yy]$ ]]; then
             log_info "Deployment cancelled by user"
             exit 0
         fi
+    elif [ "$AUTO_CONFIRM" = true ]; then
+        log_info "Auto-confirm mode: proceeding with deployment..."
     fi
     
     log_info "========================================="
@@ -757,10 +855,15 @@ main() {
     log_info "Updating nginx configuration..."
     if update_nginx_config; then
         # Ask if user wants to reload nginx
-        read -p "Do you want to reload nginx now? (y/N) " -n 1 -r
-        echo
-        if [[ $REPLY =~ ^[Yy]$ ]]; then
+        if [ "$AUTO_CONFIRM" = true ]; then
+            log_info "Auto-confirm mode: reloading nginx automatically..."
             reload_nginx || log_warn "nginx reload failed, but deployment succeeded"
+        else
+            read -p "Do you want to reload nginx now? (y/N) " -n 1 -r
+            echo
+            if [[ $REPLY =~ ^[Yy]$ ]]; then
+                reload_nginx || log_warn "nginx reload failed, but deployment succeeded"
+            fi
         fi
     else
         log_warn "nginx configuration was not updated automatically"
