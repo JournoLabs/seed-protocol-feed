@@ -427,20 +427,20 @@ setup_pm2() {
         }
     fi
     
-    # Create PM2 ecosystem file if it doesn't exist
+    # Always regenerate PM2 ecosystem file to ensure it's up to date
     # Use .cjs extension to ensure CommonJS format (works even if package.json has "type": "module")
     PM2_CONFIG="$APP_DIR/ecosystem.config.cjs"
     PM2_CONFIG_OLD="$APP_DIR/ecosystem.config.js"
     
     # Remove old .js config if it exists (migration from previous version)
-    if [ -f "$PM2_CONFIG_OLD" ] && [ ! -f "$PM2_CONFIG" ]; then
+    if [ -f "$PM2_CONFIG_OLD" ]; then
         log_info "Removing old ecosystem.config.js (migrating to .cjs format)..."
         rm -f "$PM2_CONFIG_OLD"
     fi
     
-    if [ ! -f "$PM2_CONFIG" ]; then
-        log_info "Creating PM2 ecosystem configuration..."
-        cat > "$PM2_CONFIG" << EOF
+    # Always regenerate the config to ensure it matches current build output
+    log_info "Regenerating PM2 ecosystem configuration..."
+    cat > "$PM2_CONFIG" << EOF
 module.exports = {
   apps: [{
     name: '$APP_NAME',
@@ -461,8 +461,7 @@ module.exports = {
   }]
 };
 EOF
-        log_info "PM2 ecosystem file created: $PM2_CONFIG"
-    fi
+    log_info "PM2 ecosystem file regenerated: $PM2_CONFIG"
     
     # Create logs directory
     mkdir -p "$APP_DIR/logs"
@@ -474,52 +473,72 @@ EOF
 restart_server() {
     log_info "Starting/restarting server with PM2..."
     
-    # Check if the app is already running
+    # Verify server file exists before starting
+    if [ ! -f "$APP_DIR/dist/cli.cjs" ]; then
+        log_error "Server file not found: dist/cli.cjs"
+        log_error "The server build may have failed. Check the build logs above."
+        exit 1
+    fi
+    
+    # Verify ecosystem config exists
+    if [ ! -f "$APP_DIR/ecosystem.config.cjs" ]; then
+        log_error "PM2 ecosystem config not found: ecosystem.config.cjs"
+        log_error "This should have been created by setup_pm2. Check the logs above."
+        exit 1
+    fi
+    
+    # Always delete existing process first to ensure fresh start with updated config
     if pm2 list | grep -q "$APP_NAME"; then
-        log_info "Restarting existing PM2 process..."
-        pm2 restart "$APP_NAME" || {
-            log_error "Failed to restart PM2 process"
-            exit 1
+        log_info "Stopping and deleting existing PM2 process to apply new config..."
+        pm2 delete "$APP_NAME" 2>/dev/null || {
+            log_warn "Failed to delete existing process (may not exist), continuing..."
         }
+    fi
+    
+    # Start fresh with the ecosystem config
+    log_info "Starting PM2 process with ecosystem config..."
+    cd "$APP_DIR"
+    pm2 start ecosystem.config.cjs || {
+        log_error "Failed to start PM2 process with ecosystem file"
+        log_error "Check PM2 logs: pm2 logs $APP_NAME"
+        exit 1
+    }
+    
+    # Verify PM2 is using the correct script
+    local script_path=$(pm2 jlist | grep -A 20 "\"name\":\"$APP_NAME\"" | grep '"script"' | head -1 | sed 's/.*"script":"\([^"]*\)".*/\1/')
+    if [[ "$script_path" == *"cli.cjs"* ]]; then
+        log_info "Verified: PM2 is using the correct script (dist/cli.cjs)"
     else
-        log_info "Starting new PM2 process..."
+        log_warn "Warning: PM2 script path may be incorrect: $script_path"
+        log_warn "Expected: dist/cli.cjs"
+    fi
+    
+    # Wait a moment for the server to start
+    sleep 2
+    
+    # Verify the server is actually running and listening
+    if pm2 list | grep -q "$APP_NAME.*online"; then
+        log_info "PM2 process is online"
         
-        # Verify server file exists before starting
-        if [ ! -f "$APP_DIR/dist/cli.cjs" ]; then
-            log_error "Server file not found: dist/cli.cjs"
-            log_error "The server build may have failed. Check the build logs above."
-            exit 1
+        # Check if server is listening on the port (optional verification)
+        if command -v netstat &> /dev/null; then
+            if netstat -tln 2>/dev/null | grep -q ":$SERVER_PORT "; then
+                log_info "Verified: Server is listening on port $SERVER_PORT"
+            else
+                log_warn "Warning: Server may not be listening on port $SERVER_PORT yet"
+                log_warn "Check PM2 logs if the server fails to respond: pm2 logs $APP_NAME"
+            fi
+        elif command -v ss &> /dev/null; then
+            if ss -tln 2>/dev/null | grep -q ":$SERVER_PORT "; then
+                log_info "Verified: Server is listening on port $SERVER_PORT"
+            else
+                log_warn "Warning: Server may not be listening on port $SERVER_PORT yet"
+                log_warn "Check PM2 logs if the server fails to respond: pm2 logs $APP_NAME"
+            fi
         fi
-        
-        # Check for both .cjs (preferred) and .js (legacy) config files
-        if [ -f "$APP_DIR/ecosystem.config.cjs" ]; then
-            pm2 start ecosystem.config.cjs || {
-                log_error "Failed to start PM2 process with ecosystem file"
-                log_error "Check PM2 logs: pm2 logs $APP_NAME"
-                exit 1
-            }
-        elif [ -f "$APP_DIR/ecosystem.config.js" ]; then
-            log_warn "Using legacy ecosystem.config.js (consider migrating to .cjs)"
-            pm2 start ecosystem.config.js || {
-                log_error "Failed to start PM2 process with ecosystem file"
-                log_error "Check PM2 logs: pm2 logs $APP_NAME"
-                exit 1
-            }
-        else
-            # Fallback: start directly
-            cd "$APP_DIR"
-            pm2 start dist/cli.cjs --name "$APP_NAME" \
-                --env NODE_ENV=production \
-                --env PORT=$SERVER_PORT \
-                --error ./logs/pm2-error.log \
-                --output ./logs/pm2-out.log \
-                --autorestart \
-                --max-memory-restart 500M || {
-                log_error "Failed to start PM2 process"
-                log_error "Check PM2 logs: pm2 logs $APP_NAME"
-                exit 1
-            }
-        fi
+    else
+        log_error "PM2 process is not online. Check logs: pm2 logs $APP_NAME"
+        exit 1
     fi
     
     # Save PM2 process list
