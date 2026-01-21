@@ -373,7 +373,16 @@ setup_pm2() {
     fi
     
     # Create PM2 ecosystem file if it doesn't exist
-    PM2_CONFIG="$APP_DIR/ecosystem.config.js"
+    # Use .cjs extension to ensure CommonJS format (works even if package.json has "type": "module")
+    PM2_CONFIG="$APP_DIR/ecosystem.config.cjs"
+    PM2_CONFIG_OLD="$APP_DIR/ecosystem.config.js"
+    
+    # Remove old .js config if it exists (migration from previous version)
+    if [ -f "$PM2_CONFIG_OLD" ] && [ ! -f "$PM2_CONFIG" ]; then
+        log_info "Removing old ecosystem.config.js (migrating to .cjs format)..."
+        rm -f "$PM2_CONFIG_OLD"
+    fi
+    
     if [ ! -f "$PM2_CONFIG" ]; then
         log_info "Creating PM2 ecosystem configuration..."
         cat > "$PM2_CONFIG" << EOF
@@ -419,7 +428,14 @@ restart_server() {
         }
     else
         log_info "Starting new PM2 process..."
-        if [ -f "$APP_DIR/ecosystem.config.js" ]; then
+        # Check for both .cjs (preferred) and .js (legacy) config files
+        if [ -f "$APP_DIR/ecosystem.config.cjs" ]; then
+            pm2 start ecosystem.config.cjs || {
+                log_error "Failed to start PM2 process with ecosystem file"
+                exit 1
+            }
+        elif [ -f "$APP_DIR/ecosystem.config.js" ]; then
+            log_warn "Using legacy ecosystem.config.js (consider migrating to .cjs)"
             pm2 start ecosystem.config.js || {
                 log_error "Failed to start PM2 process with ecosystem file"
                 exit 1
