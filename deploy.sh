@@ -350,14 +350,15 @@ build_application() {
             # Create dist directory if it doesn't exist
             mkdir -p dist
             
-            # Build cli.ts to dist/cli.js using esbuild
+            # Build cli.ts to dist/cli.cjs using esbuild
             # Use --packages=external to keep node_modules as external
+            # Output as .cjs so Node knows it's CommonJS (works with "type": "module" in package.json)
             npx --yes esbuild src/cli.ts \
                 --bundle \
                 --platform=node \
                 --target=node18 \
                 --format=cjs \
-                --outfile=dist/cli.js \
+                --outfile=dist/cli.cjs \
                 --packages=external \
                 --sourcemap \
                 --log-level=warning || {
@@ -377,8 +378,8 @@ build_application() {
             }
             
             # Make it executable if build succeeded
-            if [ -f "dist/cli.js" ]; then
-                chmod +x dist/cli.js 2>/dev/null || true
+            if [ -f "dist/cli.cjs" ]; then
+                chmod +x dist/cli.cjs 2>/dev/null || true
             fi
         else
             log_error "Cannot build server: npx not available and no build script found"
@@ -387,12 +388,12 @@ build_application() {
         fi
         
         # Verify server build output
-        if [ ! -f "dist/cli.js" ]; then
-            log_error "Server build failed: dist/cli.js not found"
+        if [ ! -f "dist/cli.cjs" ]; then
+            log_error "Server build failed: dist/cli.cjs not found"
             exit 1
         fi
         
-        log_info "Server built successfully: dist/cli.js"
+        log_info "Server built successfully: dist/cli.cjs"
     else
         log_warn "src/cli.ts not found. Server may not be needed for this deployment."
         log_warn "If you need the server, create src/cli.ts as the entry point."
@@ -443,7 +444,7 @@ setup_pm2() {
 module.exports = {
   apps: [{
     name: '$APP_NAME',
-    script: 'dist/cli.js',
+    script: 'dist/cli.cjs',
     instances: 1,
     exec_mode: 'fork',
     env: {
@@ -484,8 +485,8 @@ restart_server() {
         log_info "Starting new PM2 process..."
         
         # Verify server file exists before starting
-        if [ ! -f "$APP_DIR/dist/cli.js" ]; then
-            log_error "Server file not found: dist/cli.js"
+        if [ ! -f "$APP_DIR/dist/cli.cjs" ]; then
+            log_error "Server file not found: dist/cli.cjs"
             log_error "The server build may have failed. Check the build logs above."
             exit 1
         fi
@@ -507,7 +508,7 @@ restart_server() {
         else
             # Fallback: start directly
             cd "$APP_DIR"
-            pm2 start dist/cli.js --name "$APP_NAME" \
+            pm2 start dist/cli.cjs --name "$APP_NAME" \
                 --env NODE_ENV=production \
                 --env PORT=$SERVER_PORT \
                 --error ./logs/pm2-error.log \

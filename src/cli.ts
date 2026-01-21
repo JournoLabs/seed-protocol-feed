@@ -13,7 +13,7 @@ async function startServer() {
   try {
     const app = createSeedProtocolFeedServer();
     
-    app.listen(PORT, () => {
+    app.listen(PORT, '127.0.0.1', () => {
       console.log(`🚀 Seed Protocol Feed Server running on port ${PORT}`);
       console.log(`📡 Feed endpoints available at: http://localhost:${PORT}/:schemaName/:format`);
     });
