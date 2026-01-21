@@ -4,7 +4,7 @@ Generate RSS, Atom, and JSON feeds from Seed Protocol data with a Vite-based web
 
 ## Features
 
-- 🔄 **Dynamic routing** - `/feed/:schemaName/:format` to generate feeds for any schema
+- 🔄 **Dynamic routing** - `/:schemaName/:format` to generate feeds for any schema
 - 📡 **Multiple formats** - RSS 2.0, Atom 1.0, and JSON Feed 1.0
 - ⚡ **Fast development** - Built with Vite for instant HMR and optimized builds
 - 🔌 **Integrated server** - Express middleware seamlessly integrated into Vite dev server
@@ -51,21 +51,21 @@ bun run preview
 ### URL Pattern
 
 ```
-/feed/:schemaName/:format
+/:schemaName/:format
 ```
 
 The schema name is used to query Seed Protocol data:
-- `/feed/posts/rss` → RSS feed of posts
-- `/feed/articles/atom` → Atom feed of articles
-- `/feed/products/json` → JSON Feed of products
+- `/posts/rss` → RSS feed of posts
+- `/articles/atom` → Atom feed of articles
+- `/products/json` → JSON Feed of products
 
 ### Supported Formats
 
 | Format | Content-Type | URL |
 |--------|--------------|-----|
-| RSS 2.0 | `application/rss+xml` | `/feed/:schemaName/rss` |
-| Atom 1.0 | `application/atom+xml` | `/feed/:schemaName/atom` |
-| JSON Feed 1.0 | `application/feed+json` | `/feed/:schemaName/json` |
+| RSS 2.0 | `application/rss+xml` | `/:schemaName/rss` |
+| Atom 1.0 | `application/atom+xml` | `/:schemaName/atom` |
+| JSON Feed 1.0 | `application/feed+json` | `/:schemaName/json` |
 
 ## Architecture
 
@@ -180,8 +180,8 @@ The `.env.example` file shows all available configuration options.
 If you prefer manual deployment or need more control:
 
 1. Build the application: `npm run build:client`
-2. Configure nginx to serve static files from `dist/client/`
-3. Configure nginx to proxy `/feed/*` routes to your Express server
+2. Configure nginx to serve static files from `dist/client/` at the root
+3. Configure nginx to proxy API routes to your Express server (using try_files with @express)
 4. Use a process manager (PM2, systemd, etc.) to run the server
 
 See [SECURITY.md](./SECURITY.md) for detailed security best practices and considerations.

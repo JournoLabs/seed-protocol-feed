@@ -15,7 +15,7 @@ async function startServer() {
     
     app.listen(PORT, () => {
       console.log(`🚀 Seed Protocol Feed Server running on port ${PORT}`);
-      console.log(`📡 Feed endpoints available at: http://localhost:${PORT}/feed/:schemaName/:format`);
+      console.log(`📡 Feed endpoints available at: http://localhost:${PORT}/:schemaName/:format`);
     });
   } catch (error) {
     console.error('❌ Failed to start server:', error);

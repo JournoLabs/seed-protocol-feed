@@ -21,7 +21,7 @@ function feedPlugin(): PluginOption {
 }
 
 export default defineConfig({
-  base: '/feed',
+  base: '/',
   plugins: [
     seedVitePlugin() as PluginOption,
     feedPlugin(),

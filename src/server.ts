@@ -12,13 +12,7 @@ export function createSeedProtocolFeedServer(): Express {
   app.use(express.json());
   app.use(express.urlencoded({ extended: true }));
 
-  // Only handle /feed/* routes
-  app.use('/feed', (req, res, next) => {
-    // All /feed routes go through here
-    next();
-  });
-
-  app.get('/feed/:schemaName/:format', feedRoutes.getFeed);
+  app.get('/:schemaName/:format', feedRoutes.getFeed);
 
   // Add more routes here as needed
   // app.get('/api/users', userRoutes.getUsers);

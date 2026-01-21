@@ -102,7 +102,7 @@ const SITE_CONFIG: FeedConfig = {
   title: 'Seed Protocol',
   description: 'Content published via Seed Protocol',
   siteUrl: 'https://seedprotocol.io',
-  feedUrl: 'https://seedprotocol.io/feed',
+  feedUrl: 'https://feed.seedprotocol.io',
   language: 'en',
   copyright: `© ${new Date().getFullYear()} All rights reserved`,
   author: {

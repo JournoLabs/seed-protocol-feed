@@ -586,41 +586,54 @@ find_nginx_config() {
     echo "$config_file"
 }
 
-# Check if /feed location block exists in nginx config
+# Check if root-level static serving configuration exists in nginx config
 has_feed_location() {
     local config_file="$1"
     if [ -z "$config_file" ] || [ ! -f "$config_file" ]; then
         return 1
     fi
     
-    # Check if location /feed/ or location /feed exists
-    sudo grep -q "location\s\+/feed" "$config_file" 2>/dev/null
+    # Check if root directive and try_files are configured for this app
+    # Look for root pointing to dist/client and try_files with @express
+    sudo grep -q "root.*dist/client" "$config_file" 2>/dev/null && \
+    sudo grep -q "try_files.*@express" "$config_file" 2>/dev/null
 }
 
-# Add /feed location block to nginx config
+# Add root-level static serving configuration to nginx config
 add_feed_location() {
     local config_file="$1"
     
     if [ -z "$config_file" ] || [ ! -f "$config_file" ]; then
-        log_error "Cannot add feed location: config file not found or not accessible"
+        log_error "Cannot add feed configuration: config file not found or not accessible"
         return 1
     fi
     
-    log_info "Adding /feed location block to nginx config..."
+    log_info "Adding root-level static serving configuration to nginx config..."
     
     # Create backup
     local backup_file="${config_file}.backup.$(date +%Y%m%d_%H%M%S)"
     sudo cp "$config_file" "$backup_file"
     log_info "Created backup: $backup_file"
     
-    # Create temp file with the location block
+    # Create temp file with the configuration block
     local temp_file=$(mktemp)
     local feed_block_file=$(mktemp)
     
-    # Write the location block to a file
+    # Get absolute path to build directory
+    local build_dir="$APP_DIR/dist/client"
+    
+    # Write the configuration block to a file
     cat > "$feed_block_file" << FEEDBLOCK
-    # Proxy feed API routes to Express server
-    location /feed/ {
+    # Serve static files from dist/client, proxy API routes to Express server
+    root $build_dir;
+    index index.html;
+    
+    location / {
+        try_files \$uri \$uri/ @express;
+    }
+    
+    # Proxy API routes to Express server
+    location @express {
         proxy_pass http://localhost:$SERVER_PORT;
         proxy_http_version 1.1;
         proxy_set_header Upgrade \$http_upgrade;
@@ -692,19 +705,19 @@ if not match:
                 break
     
     if insert_position > 0:
-        # Check if location /feed already exists
+        # Check if root-level configuration already exists
         server_content = '\n'.join(lines[server_start:insert_position+1])
-        if 'location /feed' in server_content:
-            print("Location /feed already exists in config", file=sys.stderr)
+        if 'root' in server_content and 'dist/client' in server_content and '@express' in server_content:
+            print("Root-level static serving configuration already exists in config", file=sys.stderr)
             sys.exit(1)
         
-        # Insert the feed block before the closing brace
+        # Insert the configuration block before the closing brace
         lines.insert(insert_position, feed_block.rstrip())
         new_content = '\n'.join(lines)
         
         with open(config_file, 'w') as f:
             f.write(new_content)
-        print("Added /feed location block")
+        print("Added root-level static serving configuration")
         sys.exit(0)
     else:
         print(f"Could not find server block for {nginx_site}", file=sys.stderr)
@@ -713,18 +726,18 @@ else:
     server_block_start = match.group(1)
     closing_brace = match.group(2)
     
-    # Check if location /feed already exists
-    if 'location /feed' in server_block_start:
-        print("Location /feed already exists in config", file=sys.stderr)
+    # Check if root-level configuration already exists
+    if 'root' in server_block_start and 'dist/client' in server_block_start and '@express' in server_block_start:
+        print("Root-level static serving configuration already exists in config", file=sys.stderr)
         sys.exit(1)
     
-    # Add the location block before the closing brace
+    # Add the configuration block before the closing brace
     new_server_block = server_block_start + feed_block.rstrip() + '\n' + closing_brace
     new_content = content[:match.start()] + new_server_block + content[match.end():]
     
     with open(config_file, 'w') as f:
         f.write(new_content)
-    print("Added /feed location block")
+    print("Added root-level static serving configuration")
     sys.exit(0)
 PYTHON_SCRIPT
         
@@ -732,19 +745,27 @@ PYTHON_SCRIPT
         rm -f "$feed_block_file" "$temp_file"
         
         if [ $result -eq 0 ]; then
-            log_info "Successfully added /feed location block to nginx config"
+            log_info "Successfully added root-level static serving configuration to nginx config"
             return 0
         else
-            log_warn "Failed to automatically add location block using Python"
+            log_warn "Failed to automatically add configuration using Python"
         fi
     fi
     
     # Fallback: Use sed to append before the last } in the file
     # This is less reliable but works in simple cases
-    log_warn "Using fallback method to add location block..."
+    log_warn "Using fallback method to add configuration..."
     if sudo sed -i.bak "\$i\\
-    # Proxy feed API routes to Express server\\
-    location /feed/ {\\
+    # Serve static files from dist/client, proxy API routes to Express server\\
+    root $APP_DIR/dist/client;\\
+    index index.html;\\
+    \\
+    location / {\\
+        try_files \\\$uri \\\$uri/ @express;\\
+    }\\
+    \\
+    # Proxy API routes to Express server\\
+    location @express {\\
         proxy_pass http://localhost:$SERVER_PORT;\\
         proxy_http_version 1.1;\\
         proxy_set_header Upgrade \\\$http_upgrade;\\
@@ -761,12 +782,12 @@ PYTHON_SCRIPT
         proxy_read_timeout 60s;\\
     }\\
 " "$config_file" 2>/dev/null; then
-        log_warn "Added location block using sed (please verify the config manually)"
+        log_warn "Added configuration using sed (please verify the config manually)"
         log_warn "The block may have been added at the end of the file instead of in the server block"
         return 0
     fi
     
-    log_error "Failed to add location block automatically"
+    log_error "Failed to add configuration automatically"
     rm -f "$feed_block_file" "$temp_file"
     return 1
 }
@@ -785,21 +806,21 @@ update_nginx_config() {
     
     if [ -z "$config_file" ]; then
         log_warn "Could not find nginx configuration file for $NGINX_SITE"
-        log_warn "Please manually add the /feed location block to your nginx config"
+        log_warn "Please manually add the root-level static serving configuration to your nginx config"
         print_nginx_location_block
         return 1
     fi
     
-    # Check if /feed location already exists
+    # Check if root-level configuration already exists
     if has_feed_location "$config_file"; then
-        log_info "/feed location block already exists in nginx config"
+        log_info "Root-level static serving configuration already exists in nginx config"
         return 0
     fi
     
     # Ask for confirmation before modifying
-    log_info "The /feed location block is missing from the nginx config"
+    log_info "The root-level static serving configuration is missing from the nginx config"
     if [ "$AUTO_CONFIRM" = true ]; then
-        log_info "Auto-confirm mode: adding /feed location block automatically..."
+        log_info "Auto-confirm mode: adding root-level static serving configuration automatically..."
     else
         read -p "Do you want to add it automatically? (y/N) " -n 1 -r
         echo
@@ -822,13 +843,21 @@ update_nginx_config() {
     fi
 }
 
-# Print just the location block (for manual addition)
+# Print just the configuration block (for manual addition)
 print_nginx_location_block() {
-    log_info "=== Add this location block to your nginx server config ==="
+    log_info "=== Add this configuration to your nginx server config ==="
     cat << EOF
 
-    # Proxy feed API routes to Express server
-    location /feed/ {
+    # Serve static files from dist/client, proxy API routes to Express server
+    root $APP_DIR/dist/client;
+    index index.html;
+    
+    location / {
+        try_files \$uri \$uri/ @express;
+    }
+    
+    # Proxy API routes to Express server
+    location @express {
         proxy_pass http://localhost:$SERVER_PORT;
         proxy_http_version 1.1;
         proxy_set_header Upgrade \$http_upgrade;
@@ -846,7 +875,7 @@ print_nginx_location_block() {
     }
 
 EOF
-    log_info "=== End of location block ==="
+    log_info "=== End of configuration block ==="
 }
 
 # Reload nginx configuration
@@ -948,7 +977,7 @@ main() {
         fi
     else
         log_warn "nginx configuration was not updated automatically"
-        log_warn "Please add the /feed location block manually (see above)"
+        log_warn "Please add the root-level static serving configuration manually (see above)"
     fi
     
     log_info "========================================="
@@ -957,11 +986,11 @@ main() {
     log_info "Next steps:"
     log_info "1. Verify the server is running: pm2 status"
     log_info "2. Check server logs: pm2 logs $APP_NAME"
-    log_info "3. Test the API: curl http://localhost:$SERVER_PORT/feed/posts/rss"
+    log_info "3. Test the API: curl http://localhost:$SERVER_PORT/posts/rss"
     log_info "4. Verify nginx is serving the app correctly"
     
     if ! has_feed_location "$(find_nginx_config)" 2>/dev/null; then
-        log_warn "Remember to add the /feed location block to nginx if not done automatically"
+        log_warn "Remember to add the root-level static serving configuration to nginx if not done automatically"
     fi
 }
 
