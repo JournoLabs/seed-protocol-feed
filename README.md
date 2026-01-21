@@ -111,14 +111,36 @@ A `deploy.sh` script is provided for automated deployment to Ubuntu servers with
 
 #### Quick Start
 
+You can set environment variables either via command line or a `.env` file:
+
+**Option 1: Using environment variables**
 ```bash
-# Set environment variables (optional, defaults provided)
+# Set required environment variable (your domain name)
 export NGINX_SITE="your-domain.com"
+
+# Optional: Set server port (defaults to 3000)
 export SERVER_PORT=3000
 
 # Run the deployment script
 ./deploy.sh
 ```
+
+**Option 2: Using a .env file (recommended)**
+```bash
+# Copy the example file and customize it
+cp .env.example .env
+
+# Edit .env with your settings
+# Then run the deployment script (it will automatically load .env)
+./deploy.sh
+```
+
+The `.env.example` file shows all available configuration options.
+
+**Note**: 
+- The `NGINX_SITE` environment variable is **required**. The script will not proceed without it.
+- The `.env` file is automatically gitignored, so you can safely store your configuration there.
+- Environment variables set via `export` take precedence over values in `.env`.
 
 #### What the Script Does
 
