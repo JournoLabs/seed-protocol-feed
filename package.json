@@ -1,6 +1,6 @@
 {
   "name": "seed-protocol-feed",
-  "version": "1.0.0",
+  "version": "0.0.1",
   "description": "Generate RSS, Atom, and JSON feeds from Seed Protocol GraphQL queries with dynamic routing",
   "keywords": [
     "seed-protocol",
@@ -55,7 +55,7 @@
     "clean": "rimraf dist"
   },
   "dependencies": {
-    "@seedprotocol/sdk": "link:@seedprotocol/sdk",
+    "@seedprotocol/sdk": "0.4.0",
     "express": "^5.2.1",
     "feedsmith": "^2.9.0",
     "graphql": "^16.12.0",
