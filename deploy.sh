@@ -333,15 +333,69 @@ build_application() {
         exit 1
     }
     
-    # Build the server (if build script exists)
-    if npm run build &> /dev/null; then
-        log_info "Building server..."
-        npm run build || {
-            log_error "Failed to build server"
+    # Build the server
+    # Check if cli.ts exists (server entry point)
+    if [ -f "src/cli.ts" ]; then
+        log_info "Building server (cli.ts)..."
+        
+        # Try using npm run build if it exists
+        if npm run build &> /dev/null 2>&1; then
+            npm run build || {
+                log_error "Failed to build server with npm run build"
+                exit 1
+            }
+        # Otherwise, try building with esbuild directly (available via vite)
+        elif command -v npx &> /dev/null; then
+            log_info "Building server with esbuild..."
+            # Create dist directory if it doesn't exist
+            mkdir -p dist
+            
+            # Build cli.ts to dist/cli.js using esbuild
+            # Use --packages=external to keep node_modules as external
+            npx --yes esbuild src/cli.ts \
+                --bundle \
+                --platform=node \
+                --target=node18 \
+                --format=cjs \
+                --outfile=dist/cli.js \
+                --packages=external \
+                --sourcemap \
+                --log-level=warning || {
+                log_error "Failed to build server with esbuild"
+                log_error "Trying alternative: using tsx to run TypeScript directly..."
+                
+                # Fallback: check if we can use tsx or ts-node
+                if command -v tsx &> /dev/null || npx tsx --version &> /dev/null; then
+                    log_info "Using tsx to run TypeScript directly (no build needed)"
+                    # Update PM2 config to use tsx in next run
+                    log_warn "Note: For production, consider adding a build script to package.json"
+                else
+                    log_error "Cannot build server. Please add a 'build' script to package.json:"
+                    log_error "  \"build\": \"tsup src/cli.ts --format cjs --outDir dist\""
+                    exit 1
+                fi
+            }
+            
+            # Make it executable if build succeeded
+            if [ -f "dist/cli.js" ]; then
+                chmod +x dist/cli.js 2>/dev/null || true
+            fi
+        else
+            log_error "Cannot build server: npx not available and no build script found"
+            log_error "Please add a 'build' script to package.json or install npx"
             exit 1
-        }
+        fi
+        
+        # Verify server build output
+        if [ ! -f "dist/cli.js" ]; then
+            log_error "Server build failed: dist/cli.js not found"
+            exit 1
+        fi
+        
+        log_info "Server built successfully: dist/cli.js"
     else
-        log_warn "No server build script found. Skipping server build."
+        log_warn "src/cli.ts not found. Server may not be needed for this deployment."
+        log_warn "If you need the server, create src/cli.ts as the entry point."
     fi
     
     # Verify build output
@@ -428,16 +482,26 @@ restart_server() {
         }
     else
         log_info "Starting new PM2 process..."
+        
+        # Verify server file exists before starting
+        if [ ! -f "$APP_DIR/dist/cli.js" ]; then
+            log_error "Server file not found: dist/cli.js"
+            log_error "The server build may have failed. Check the build logs above."
+            exit 1
+        fi
+        
         # Check for both .cjs (preferred) and .js (legacy) config files
         if [ -f "$APP_DIR/ecosystem.config.cjs" ]; then
             pm2 start ecosystem.config.cjs || {
                 log_error "Failed to start PM2 process with ecosystem file"
+                log_error "Check PM2 logs: pm2 logs $APP_NAME"
                 exit 1
             }
         elif [ -f "$APP_DIR/ecosystem.config.js" ]; then
             log_warn "Using legacy ecosystem.config.js (consider migrating to .cjs)"
             pm2 start ecosystem.config.js || {
                 log_error "Failed to start PM2 process with ecosystem file"
+                log_error "Check PM2 logs: pm2 logs $APP_NAME"
                 exit 1
             }
         else
@@ -451,6 +515,7 @@ restart_server() {
                 --autorestart \
                 --max-memory-restart 500M || {
                 log_error "Failed to start PM2 process"
+                log_error "Check PM2 logs: pm2 logs $APP_NAME"
                 exit 1
             }
         fi
