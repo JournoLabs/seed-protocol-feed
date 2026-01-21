@@ -363,31 +363,48 @@ build_application() {
         log_info "Setting up server runtime..."
         
         # Prefer using tsx to run TypeScript directly (avoids bundling issues with SDK)
-        # Check if tsx is available (install if needed)
-        if ! command -v tsx &> /dev/null && ! npx tsx --version &> /dev/null 2>&1; then
-            log_info "Installing tsx to run TypeScript directly..."
+        # Check if tsx is available locally first
+        TSX_AVAILABLE=false
+        if command -v tsx &> /dev/null; then
+            log_info "tsx is installed globally"
+            TSX_AVAILABLE=true
+        elif [ -f "node_modules/.bin/tsx" ]; then
+            log_info "tsx found in node_modules"
+            TSX_AVAILABLE=true
+        else
+            log_info "tsx not found in node_modules, installing as dev dependency..."
             if command -v bun &> /dev/null; then
                 bun add -d tsx || {
-                    log_warn "Failed to install tsx with bun, trying npx tsx..."
+                    log_warn "Failed to install tsx with bun"
+                    TSX_AVAILABLE=false
                 }
             else
                 npm install --save-dev tsx || {
-                    log_warn "Failed to install tsx, trying npx tsx..."
+                    log_warn "Failed to install tsx with npm"
+                    TSX_AVAILABLE=false
                 }
+            fi
+            # Check if installation succeeded
+            if [ -f "node_modules/.bin/tsx" ]; then
+                log_info "tsx installed successfully"
+                TSX_AVAILABLE=true
+            elif command -v tsx &> /dev/null; then
+                log_info "tsx is now available"
+                TSX_AVAILABLE=true
             fi
         fi
         
         # Verify tsx works
-        if command -v tsx &> /dev/null || npx tsx --version &> /dev/null 2>&1; then
+        if [ "$TSX_AVAILABLE" = "true" ]; then
             log_info "Using tsx to run TypeScript directly (no build needed)"
             export SERVER_USE_TSX=true
             # No build needed - tsx will run TypeScript directly
         else
             log_error "tsx is not available and cannot be installed"
             if command -v bun &> /dev/null; then
-                log_error "Please install tsx: bun add -d tsx"
+                log_error "Please install tsx manually: bun add -d tsx"
             else
-                log_error "Please install tsx: npm install --save-dev tsx"
+                log_error "Please install tsx manually: npm install --save-dev tsx"
             fi
             exit 1
         fi
