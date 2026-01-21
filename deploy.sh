@@ -134,6 +134,7 @@ APP_NAME="${APP_NAME:-seed-protocol-feed}"
 BUILD_DIR="$APP_DIR/dist/client"
 SERVER_PORT="${SERVER_PORT:-3000}"
 NODE_ENV="${NODE_ENV:-production}"
+SERVER_USE_TSX="${SERVER_USE_TSX:-false}"
 
 # NGINX_SITE is required - no default to avoid hardcoding a specific domain
 # Users must set this to their own domain (via env var or .env file)
@@ -333,67 +334,30 @@ build_application() {
         exit 1
     }
     
-    # Build the server
+    # Setup server runtime
     # Check if cli.ts exists (server entry point)
     if [ -f "src/cli.ts" ]; then
-        log_info "Building server (cli.ts)..."
+        log_info "Setting up server runtime..."
         
-        # Try using npm run build if it exists
-        if npm run build &> /dev/null 2>&1; then
-            npm run build || {
-                log_error "Failed to build server with npm run build"
-                exit 1
+        # Prefer using tsx to run TypeScript directly (avoids bundling issues with SDK)
+        # Check if tsx is available (install if needed)
+        if ! command -v tsx &> /dev/null && ! npx tsx --version &> /dev/null 2>&1; then
+            log_info "Installing tsx to run TypeScript directly..."
+            npm install --save-dev tsx || {
+                log_warn "Failed to install tsx, trying npx tsx..."
             }
-        # Otherwise, try building with esbuild directly (available via vite)
-        elif command -v npx &> /dev/null; then
-            log_info "Building server with esbuild..."
-            # Create dist directory if it doesn't exist
-            mkdir -p dist
-            
-            # Build cli.ts to dist/cli.cjs using esbuild
-            # Use --packages=external to keep node_modules as external
-            # Output as .cjs so Node knows it's CommonJS (works with "type": "module" in package.json)
-            npx --yes esbuild src/cli.ts \
-                --bundle \
-                --platform=node \
-                --target=node18 \
-                --format=cjs \
-                --outfile=dist/cli.cjs \
-                --packages=external \
-                --sourcemap \
-                --log-level=warning || {
-                log_error "Failed to build server with esbuild"
-                log_error "Trying alternative: using tsx to run TypeScript directly..."
-                
-                # Fallback: check if we can use tsx or ts-node
-                if command -v tsx &> /dev/null || npx tsx --version &> /dev/null; then
-                    log_info "Using tsx to run TypeScript directly (no build needed)"
-                    # Update PM2 config to use tsx in next run
-                    log_warn "Note: For production, consider adding a build script to package.json"
-                else
-                    log_error "Cannot build server. Please add a 'build' script to package.json:"
-                    log_error "  \"build\": \"tsup src/cli.ts --format cjs --outDir dist\""
-                    exit 1
-                fi
-            }
-            
-            # Make it executable if build succeeded
-            if [ -f "dist/cli.cjs" ]; then
-                chmod +x dist/cli.cjs 2>/dev/null || true
-            fi
+        fi
+        
+        # Verify tsx works
+        if command -v tsx &> /dev/null || npx tsx --version &> /dev/null 2>&1; then
+            log_info "Using tsx to run TypeScript directly (no build needed)"
+            export SERVER_USE_TSX=true
+            # No build needed - tsx will run TypeScript directly
         else
-            log_error "Cannot build server: npx not available and no build script found"
-            log_error "Please add a 'build' script to package.json or install npx"
+            log_error "tsx is not available and cannot be installed"
+            log_error "Please install tsx: npm install --save-dev tsx"
             exit 1
         fi
-        
-        # Verify server build output
-        if [ ! -f "dist/cli.cjs" ]; then
-            log_error "Server build failed: dist/cli.cjs not found"
-            exit 1
-        fi
-        
-        log_info "Server built successfully: dist/cli.cjs"
     else
         log_warn "src/cli.ts not found. Server may not be needed for this deployment."
         log_warn "If you need the server, create src/cli.ts as the entry point."
@@ -438,15 +402,37 @@ setup_pm2() {
         rm -f "$PM2_CONFIG_OLD"
     fi
     
-    # Always regenerate the config to ensure it matches current build output
+    # Determine which script to use (tsx for TypeScript or built file)
+    if [ "${SERVER_USE_TSX:-false}" = "true" ]; then
+        # Use tsx to run TypeScript directly
+        if command -v tsx &> /dev/null; then
+            SERVER_SCRIPT="tsx"
+            SERVER_ARGS="src/cli.ts"
+        else
+            SERVER_SCRIPT="npx"
+            SERVER_ARGS="tsx src/cli.ts"
+        fi
+        log_info "PM2 will use tsx to run TypeScript directly"
+    else
+        # Use built file
+        SERVER_SCRIPT="dist/cli.cjs"
+        SERVER_ARGS=""
+        log_info "PM2 will use built file: dist/cli.cjs"
+    fi
+    
+    # Always regenerate the config to ensure it matches current setup
     log_info "Regenerating PM2 ecosystem configuration..."
-    cat > "$PM2_CONFIG" << EOF
+    if [ -n "$SERVER_ARGS" ]; then
+        # Using tsx - need to set script and args separately
+        cat > "$PM2_CONFIG" << EOF
 module.exports = {
   apps: [{
     name: '$APP_NAME',
-    script: 'dist/cli.cjs',
+    script: '$SERVER_SCRIPT',
+    args: '$SERVER_ARGS',
     instances: 1,
     exec_mode: 'fork',
+    cwd: '$APP_DIR',
     env: {
       NODE_ENV: 'production',
       PORT: $SERVER_PORT
@@ -461,6 +447,13 @@ module.exports = {
   }]
 };
 EOF
+    else
+        # Using built file
+        cat > "$PM2_CONFIG" << EOF
+module.exports = {
+  apps: [{
+    name: '$APP_NAME',
+    script: '$SERVER_SCRIPT',
     log_info "PM2 ecosystem file regenerated: $PM2_CONFIG"
     
     # Create logs directory
@@ -473,11 +466,26 @@ EOF
 restart_server() {
     log_info "Starting/restarting server with PM2..."
     
-    # Verify server file exists before starting
-    if [ ! -f "$APP_DIR/dist/cli.cjs" ]; then
-        log_error "Server file not found: dist/cli.cjs"
-        log_error "The server build may have failed. Check the build logs above."
-        exit 1
+    # Verify server setup before starting
+    if [ "${SERVER_USE_TSX:-false}" = "true" ]; then
+        # Verify tsx is available and source file exists
+        if [ ! -f "$APP_DIR/src/cli.ts" ]; then
+            log_error "Server source file not found: src/cli.ts"
+            exit 1
+        fi
+        if ! command -v tsx &> /dev/null && ! npx tsx --version &> /dev/null 2>&1; then
+            log_error "tsx is not available. Please install it: npm install --save-dev tsx"
+            exit 1
+        fi
+        log_info "Using tsx to run TypeScript directly"
+    else
+        # Verify built file exists
+        if [ ! -f "$APP_DIR/dist/cli.cjs" ]; then
+            log_error "Server file not found: dist/cli.cjs"
+            log_error "The server build may have failed. Check the build logs above."
+            exit 1
+        fi
+        log_info "Using built file: dist/cli.cjs"
     fi
     
     # Verify ecosystem config exists
@@ -506,11 +514,20 @@ restart_server() {
     
     # Verify PM2 is using the correct script
     local script_path=$(pm2 jlist | grep -A 20 "\"name\":\"$APP_NAME\"" | grep '"script"' | head -1 | sed 's/.*"script":"\([^"]*\)".*/\1/')
-    if [[ "$script_path" == *"cli.cjs"* ]]; then
-        log_info "Verified: PM2 is using the correct script (dist/cli.cjs)"
+    if [ "${SERVER_USE_TSX:-false}" = "true" ]; then
+        if [[ "$script_path" == *"tsx"* ]]; then
+            log_info "Verified: PM2 is using tsx to run TypeScript"
+        else
+            log_warn "Warning: PM2 script path may be incorrect: $script_path"
+            log_warn "Expected: tsx or npx tsx"
+        fi
     else
-        log_warn "Warning: PM2 script path may be incorrect: $script_path"
-        log_warn "Expected: dist/cli.cjs"
+        if [[ "$script_path" == *"cli.cjs"* ]]; then
+            log_info "Verified: PM2 is using the correct script (dist/cli.cjs)"
+        else
+            log_warn "Warning: PM2 script path may be incorrect: $script_path"
+            log_warn "Expected: dist/cli.cjs"
+        fi
     fi
     
     # Wait a moment for the server to start
@@ -623,8 +640,20 @@ has_feed_location() {
 add_feed_location() {
     local config_file="$1"
     
-    if [ -z "$config_file" ] || [ ! -f "$config_file" ]; then
-        log_error "Cannot add feed configuration: config file not found or not accessible"
+    if [ -z "$config_file" ]; then
+        log_error "Cannot add feed configuration: nginx config file not found"
+        log_error "The nginx configuration file for $NGINX_SITE does not exist yet."
+        log_error ""
+        log_error "You need to create the nginx config file first. Options:"
+        log_error "  1. Use the example config: nginx.example.conf"
+        log_error "  2. Run certbot to create it: sudo certbot --nginx -d $NGINX_SITE"
+        log_error "  3. Manually create: /etc/nginx/sites-available/$NGINX_SITE"
+        return 1
+    fi
+    
+    if [ ! -f "$config_file" ]; then
+        log_error "Cannot add feed configuration: config file not accessible: $config_file"
+        log_error "Please check file permissions or create the file first."
         return 1
     fi
     
@@ -825,9 +854,29 @@ update_nginx_config() {
     local config_file=$(find_nginx_config)
     
     if [ -z "$config_file" ]; then
+        log_warn "========================================="
+        log_warn "nginx Configuration File Not Found"
+        log_warn "========================================="
         log_warn "Could not find nginx configuration file for $NGINX_SITE"
-        log_warn "Please manually add the root-level static serving configuration to your nginx config"
+        log_warn ""
+        log_warn "The nginx config file needs to be created first. You can:"
+        log_warn ""
+        log_warn "Option 1: Use certbot (recommended for SSL setup):"
+        log_warn "  sudo certbot --nginx -d $NGINX_SITE"
+        log_warn "  (This will create the config and set up SSL automatically)"
+        log_warn ""
+        log_warn "Option 2: Create manually from example:"
+        log_warn "  sudo cp nginx.example.conf /etc/nginx/sites-available/$NGINX_SITE"
+        log_warn "  sudo ln -s /etc/nginx/sites-available/$NGINX_SITE /etc/nginx/sites-enabled/"
+        log_warn "  sudo nginx -t"
+        log_warn "  sudo systemctl reload nginx"
+        log_warn ""
+        log_warn "Option 3: Add configuration manually to existing nginx config:"
         print_nginx_location_block
+        log_warn ""
+        log_warn "After creating the config file, you can run this deploy script again"
+        log_warn "and it will automatically add the feed configuration."
+        log_warn "========================================="
         return 1
     fi
     
