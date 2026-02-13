@@ -59,3 +59,16 @@ export interface GraphQLResponse<T> {
   }
   errors?: Array<{ message: string }>
 }
+
+/**
+ * Image metadata extracted from Arweave transaction
+ */
+export interface ImageMetadata {
+  isImage: boolean
+  url: string
+  mimeType?: string
+  width?: number
+  height?: number
+  size?: number // bytes
+  format?: string // 'jpeg', 'png', 'webp', 'gif', 'svg', etc.
+}

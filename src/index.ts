@@ -1,11 +1,33 @@
 import { client as seedClient, getFeedItemsBySchemaName } from '@seedprotocol/sdk';
 import pluralize from 'pluralize';
-import type { FeedFormat, GraphQLItem, TransformOptions, FeedConfig } from './types';
+import type { FeedFormat, GraphQLItem, TransformOptions, FeedConfig, ImageMetadata } from './types';
 import { generateRssFeed, generateAtomFeed, generateJsonFeed } from 'feedsmith';
 import { gql } from 'graphql-request';
+import { CacheManager } from './cache/CacheManager';
+import { loadCacheConfig } from './cache/config';
+import { checkIfNoneMatch } from './utils/etag';
+import { ArweaveImageService } from './services/arweaveImageService';
 
 let client: any;
 let initializationPromise: Promise<void> | null = null;
+
+// Initialize cache manager
+let cacheManager: CacheManager | null = null;
+
+function getCacheManager(): CacheManager {
+  if (!cacheManager) {
+    const config = loadCacheConfig();
+    cacheManager = new CacheManager(config);
+  }
+  return cacheManager;
+}
+
+/**
+ * Reset cache manager (useful for testing)
+ */
+export function resetCacheManager(): void {
+  cacheManager = null;
+}
 
 /**
  * Initialize the Seed Protocol client
@@ -116,17 +138,7 @@ const SITE_CONFIG: FeedConfig = {
 // GraphQL Client (replace with your actual client)
 // ============================================================================
 
-const GET_SCHEMAS = gql`
-  query GetSchemas($where: SchemaWhereInput!) {
-    schemas: schemata(where: $where) {
-      id
-      schema
-      schemaNames {
-        name
-      }
-    }
-  }
-`
+// GET_SCHEMAS query removed - unused
 
 export const GET_SEEDS = gql`
   query GetSeeds($where: AttestationWhereInput!) {
@@ -151,6 +163,76 @@ export const GET_SEEDS = gql`
 // ============================================================================
 // Feed Transformation
 // ============================================================================
+
+/**
+ * Enriches feed items with media properties from Arweave storageTransactionId
+ */
+async function enrichFeedItemsWithMedia(
+  items: GraphQLItem[],
+  imageService: ArweaveImageService,
+  cache: CacheManager
+): Promise<GraphQLItem[]> {
+  // Filter items that have storageTransactionId
+  const itemsToProcess = items.filter(
+    (item: any) => item.storageTransactionId || item.storage_transaction_id
+  )
+
+  if (itemsToProcess.length === 0) {
+    return items
+  }
+
+  console.log(`Enriching ${itemsToProcess.length} items with image metadata`)
+
+  // Process all items in parallel
+  const enrichmentPromises = itemsToProcess.map(async (item: any) => {
+    const transactionId = item.storageTransactionId || item.storage_transaction_id
+    if (!transactionId) return item
+
+    try {
+      // Check cache first
+      let imageMetadata = await cache.getImageMetadata(transactionId)
+
+      // If not cached, detect image
+      if (!imageMetadata) {
+        console.log(`Detecting image for transaction ${transactionId}`)
+        imageMetadata = await imageService.detectImage(transactionId)
+        // Cache the result (even if it's not an image, to avoid retries)
+        await cache.setImageMetadata(transactionId, imageMetadata)
+      }
+
+      // If image detected, add media properties
+      if (imageMetadata.isImage) {
+        // Add media properties to the item
+        item._imageMetadata = imageMetadata
+        item._hasImage = true
+      }
+
+      return item
+    } catch (error) {
+      console.warn(`Error enriching item with transaction ${transactionId}:`, error)
+      return item // Return item unchanged on error
+    }
+  })
+
+  // Wait for all enrichments to complete
+  const enrichedItems = await Promise.all(enrichmentPromises)
+
+  // Create a map of enriched items by their ID
+  const enrichedMap = new Map<string, GraphQLItem>()
+  enrichedItems.forEach(item => {
+    const itemId = item.id || (item as any).seedUid || (item as any).SeedUid || ''
+    if (itemId) {
+      enrichedMap.set(itemId, item)
+    }
+  })
+
+  // Merge enriched items back into original array
+  return items.map(item => {
+    const itemId = item.id || (item as any).seedUid || (item as any).SeedUid || ''
+    const enriched = enrichedMap.get(itemId)
+    return enriched || item
+  })
+}
 
 /**
  * Transforms GraphQL items into feed items.
@@ -202,6 +284,13 @@ function transformToFeedItems(
       guid: item.guid || item.Guid || item.link || item.Link || itemId,
     }
 
+    // Add image metadata if available from enrichment
+    if (item._imageMetadata && item._hasImage) {
+      const imageMeta: ImageMetadata = item._imageMetadata
+      feedItem._imageMetadata = imageMeta
+      feedItem._hasImage = true
+    }
+
     // Convert any date-like string properties to Date objects
     Object.keys(feedItem).forEach((key) => {
       const value = feedItem[key]
@@ -224,10 +313,13 @@ function transformToFeedItems(
 export const createFeed = (
   items: GraphQLItem[],
   schemaName: string,
-  format: FeedFormat
+  format: FeedFormat,
+  cacheBust?: string
 ): Promise<string> => {
   const collectionName = pluralize(schemaName)
-  const feedUrl = `${SITE_CONFIG.siteUrl}/${collectionName}/${format}`
+  // Add cache busting parameter to feed URL if provided
+  const feedUrlBase = `${SITE_CONFIG.siteUrl}/${collectionName}/${format}`
+  const feedUrl = cacheBust ? `${feedUrlBase}?v=${cacheBust}` : feedUrlBase
   const feedTitle = `${SITE_CONFIG.title} - ${capitalize(collectionName)}`
   const now = new Date()
 
@@ -267,6 +359,27 @@ export const createFeed = (
           }
           if (item.content) entry.content = item.content
           if (item.description) entry.summary = item.description
+          
+          // Add image as enclosure link if available
+          if (item._imageMetadata && item._hasImage) {
+            const imageMeta: ImageMetadata = item._imageMetadata
+            if (!entry.links) entry.links = []
+            entry.links.push({
+              href: imageMeta.url,
+              rel: 'enclosure',
+              type: imageMeta.mimeType || 'image/jpeg',
+              length: imageMeta.size,
+            })
+            
+            // Enhance content with image if not already present
+            if (imageMeta.url && entry.content && !entry.content.includes(imageMeta.url)) {
+              const imageHtml = `<img src="${imageMeta.url}" alt="${item.title || ''}"${imageMeta.width ? ` width="${imageMeta.width}"` : ''}${imageMeta.height ? ` height="${imageMeta.height}"` : ''} />`
+              entry.content = typeof entry.content === 'string' 
+                ? `${imageHtml}\n${entry.content}`
+                : { type: 'html', value: `${imageHtml}\n${entry.content.value || entry.content}` }
+            }
+          }
+          
           return entry
         }),
       }
@@ -294,6 +407,28 @@ export const createFeed = (
           if (item.content) jsonItem.content_html = item.content
           if (item.description) jsonItem.summary = item.description
           if (item.date || item.pubDate) jsonItem.date_published = item.date || item.pubDate
+          
+          // Add image and attachments if available
+          if (item._imageMetadata && item._hasImage) {
+            const imageMeta: ImageMetadata = item._imageMetadata
+            jsonItem.image = imageMeta.url
+            
+            // Add as attachment
+            if (!jsonItem.attachments) jsonItem.attachments = []
+            jsonItem.attachments.push({
+              url: imageMeta.url,
+              mime_type: imageMeta.mimeType || 'image/jpeg',
+              size_in_bytes: imageMeta.size,
+              title: item.title || 'Image',
+            })
+            
+            // Enhance content_html with image if not already present
+            if (imageMeta.url && jsonItem.content_html && !jsonItem.content_html.includes(imageMeta.url)) {
+              const imageHtml = `<img src="${imageMeta.url}" alt="${item.title || ''}"${imageMeta.width ? ` width="${imageMeta.width}"` : ''}${imageMeta.height ? ` height="${imageMeta.height}"` : ''} />`
+              jsonItem.content_html = `${imageHtml}\n${jsonItem.content_html}`
+            }
+          }
+          
           return jsonItem
         }),
       }
@@ -337,8 +472,111 @@ export const createFeed = (
             }
           }
           
-          // Map feature_image to enclosure for RSS (media attachments)
-          if (item.feature_image || item.featureImage) {
+          // Add image from storageTransactionId if available (from enrichment)
+          if (item._imageMetadata && item._hasImage) {
+            const imageMeta: ImageMetadata = item._imageMetadata
+            
+            // Add enclosure for RSS (standard RSS 2.0)
+            rssItem.enclosures = [{
+              url: imageMeta.url,
+              type: imageMeta.mimeType || 'image/jpeg',
+              length: imageMeta.size,
+            }]
+            
+            // Build comprehensive Media RSS properties
+            const mediaContent: any = {
+              url: imageMeta.url,
+              type: imageMeta.mimeType || 'image/jpeg',
+              medium: 'image', // image, video, audio, document
+            }
+            
+            // Add dimensions if available
+            if (imageMeta.width) mediaContent.width = imageMeta.width
+            if (imageMeta.height) mediaContent.height = imageMeta.height
+            if (imageMeta.size) mediaContent.fileSize = imageMeta.size
+            if (imageMeta.format) mediaContent.format = imageMeta.format
+            
+            // Add Media RSS namespace properties
+            rssItem['media:content'] = [mediaContent]
+            
+            // Add media:thumbnail (required by many readers)
+            const thumbnail: any = {
+              url: imageMeta.url,
+            }
+            if (imageMeta.width) thumbnail.width = imageMeta.width
+            if (imageMeta.height) thumbnail.height = imageMeta.height
+            rssItem['media:thumbnail'] = [thumbnail]
+            
+            // Add media:title (many readers look for this)
+            if (item.title) {
+              rssItem['media:title'] = item.title
+            }
+            
+            // Add media:description (enhanced)
+            const mediaDescription = item.description || item.summary || item.title || ''
+            if (mediaDescription) {
+              rssItem['media:description'] = mediaDescription
+            }
+            
+            // Add media:keywords for better discoverability
+            if (item.title) {
+              // Extract keywords from title and description
+              const keywords: string[] = []
+              if (item.title) {
+                keywords.push(...item.title.toLowerCase().split(/\s+/).filter((w: string) => w.length > 3))
+              }
+              if (item.description) {
+                keywords.push(...item.description.toLowerCase().split(/\s+/).filter((w: string) => w.length > 3))
+              }
+              if (keywords.length > 0) {
+                rssItem['media:keywords'] = [...new Set(keywords)].slice(0, 10).join(', ')
+              }
+            }
+            
+            // Add media:credit (author information)
+            if (item.authors && Array.isArray(item.authors) && item.authors.length > 0) {
+              rssItem['media:credit'] = item.authors.map((author: any) => ({
+                value: author.name || author.displayName || 'Unknown',
+                role: 'author',
+              }))
+            } else if (SITE_CONFIG.author) {
+              rssItem['media:credit'] = [{
+                value: SITE_CONFIG.author.name,
+                role: 'author',
+              }]
+            }
+            
+            // Add media:copyright
+            if (SITE_CONFIG.copyright) {
+              rssItem['media:copyright'] = SITE_CONFIG.copyright
+            }
+            
+            // Add media:category (can be used for content categorization)
+            if (schemaName) {
+              rssItem['media:category'] = [{
+                value: schemaName,
+                scheme: 'http://www.schema.org/',
+              }]
+            }
+            
+            // Add media:group to bundle all media elements together
+            // This is useful for readers that prefer grouped media
+            rssItem['media:group'] = [{
+              'media:content': [mediaContent],
+              'media:thumbnail': [thumbnail],
+              'media:title': item.title || 'Untitled',
+              'media:description': mediaDescription,
+            }]
+            
+            // Enhance content:encoded with image if not already present
+            if (imageMeta.url && item.content && !item.content.includes(imageMeta.url)) {
+              const imageHtml = `<img src="${imageMeta.url}" alt="${item.title || ''}"${imageMeta.width ? ` width="${imageMeta.width}"` : ''}${imageMeta.height ? ` height="${imageMeta.height}"` : ''} />`
+              rssItem['content:encoded'] = `${imageHtml}\n${item.content}`
+            }
+          }
+          
+          // Map feature_image to enclosure for RSS (media attachments) - fallback
+          if (!rssItem.enclosures && (item.feature_image || item.featureImage)) {
             const imageUrl = item.feature_image || item.featureImage
             // If it's a URL, use it directly; if it's an Arweave transaction ID, construct URL
             const enclosureUrl = typeof imageUrl === 'string' && imageUrl.startsWith('http')
@@ -431,10 +669,13 @@ function capitalize(str: string): string {
  *   - /posts/rss    → RSS feed of posts
  *   - /posts/atom   → Atom feed of posts
  *   - /identities/json → JSON feed of identities
+ *   - /posts/rss?v=1234567890 → RSS feed with cache busting parameter
  */
 export async function handleFeedRequest(
   collectionSegment: string,
-  formatSegment: string
+  formatSegment: string,
+  ifNoneMatch?: string | null,
+  cacheBust?: string
 ): Promise<Response> {
   // Validate format
   const format = parseFormat(formatSegment)
@@ -455,34 +696,188 @@ export async function handleFeedRequest(
   console.log(`Schema name: ${schemaName}`);
   console.log(`Collection name: ${collectionName}`);
 
+  const cache = getCacheManager();
+  const config = loadCacheConfig();
+
   try {
-    const client = await getClient()
-    if (client) {
-      console.log(`Client initialized: ${client.isInitialized()}`);
+    // Check if we have cached feed content
+    if (config.enabled) {
+      const cachedContent = await cache.getFeedContent(schemaName, format);
+      
+      if (cachedContent) {
+        // Check ETag for conditional request
+        if (ifNoneMatch && checkIfNoneMatch(ifNoneMatch, cachedContent.etag)) {
+          console.log(`Cache hit with ETag match for ${schemaName}:${format} - returning 304`);
+          return new Response(null, {
+            status: 304,
+            headers: {
+              'ETag': cachedContent.etag,
+              'Last-Modified': new Date(cachedContent.lastModified * 1000).toUTCString(),
+              'Cache-Control': 'public, max-age=3600, s-maxage=3600, must-revalidate',
+            },
+          });
+        }
+
+        // Return cached content
+        console.log(`Cache hit for ${schemaName}:${format}`);
+        return new Response(cachedContent.content, {
+          status: 200,
+          headers: {
+            'Content-Type': cachedContent.contentType,
+            'ETag': cachedContent.etag,
+            'Last-Modified': new Date(cachedContent.lastModified * 1000).toUTCString(),
+            'Cache-Control': 'public, max-age=3600, s-maxage=3600, must-revalidate',
+            'X-Feed-Schema': schemaName,
+            'X-Feed-Format': format,
+            'X-Cache': 'HIT',
+          },
+        });
+      }
     }
-    // const models = getModels()
-    // console.log(`Models: ${Object.keys(models)}`);
 
-    const feedItems = await getFeedItemsBySchemaName(schemaName)
+    // Cache miss or disabled - fetch and process items
+    console.log(`Cache miss for ${schemaName}:${format} - fetching items`);
 
-    console.log(`Found ${feedItems.length} feed items for schema ${schemaName}`)
+    // Use refresh lock to prevent concurrent fetches (only if cache is enabled)
+    const feedItems = config.enabled
+      ? await cache.withRefreshLock(schemaName, async () => {
+          // Check cache again after acquiring lock (another request might have populated it)
+          const cachedData = await cache.getFeedData(schemaName);
+          
+          let items: GraphQLItem[];
+          
+          if (cachedData) {
+            // Incremental fetch: only get new items
+            console.log(`Incremental fetch: last processed timestamp: ${cachedData.lastProcessedTimestamp}`);
+            
+            // Fetch all items (SDK might not support filtering by timestamp)
+            const allItems = await getFeedItemsBySchemaName(schemaName) as GraphQLItem[];
 
-    console.log(JSON.stringify(feedItems[0], null, 2))
+            console.log(`First item: ${JSON.stringify(allItems[0])}`);
+            
+            // Filter to only new items
+            const newItems = cache.filterNewItems(allItems, cachedData.lastProcessedTimestamp);
+            
+            if (newItems.length > 0) {
+              console.log(`Found ${newItems.length} new items, merging with ${cachedData.items.length} cached items`);
+              // Merge new items with cached items
+              items = cache.mergeItems(cachedData.items, newItems);
+            } else {
+              console.log(`No new items found, using cached items`);
+              // No new items, use cached items
+              items = cachedData.items;
+            }
+          } else {
+            // Cold cache - fetch all items
+            console.log(`Cold cache - fetching all items`);
+            const client = await getClient()
+            if (client) {
+              console.log(`Client initialized: ${client.isInitialized()}`);
+            }
+            
+            items = await getFeedItemsBySchemaName(schemaName) as GraphQLItem[];
+            console.log(`Found ${items.length} feed items for schema ${schemaName}`);
+          }
 
-    // Generate the feed
-    const feedContent = await createFeed(feedItems as GraphQLItem[], schemaName, format)
+          // Enrich items with image metadata if enabled
+          let enrichedItems = items;
+          if (config.imageMetadata?.enabled) {
+            const imageService = new ArweaveImageService({
+              gateways: config.imageMetadata.gateways,
+              timeout: config.imageMetadata.timeout,
+            });
+            enrichedItems = await enrichFeedItemsWithMedia(items, imageService, cache);
+          }
 
+          // Update cache with items (use original items, not enriched, to keep cache clean)
+          await cache.setFeedData(schemaName, items);
+          
+          return enrichedItems;
+        })
+      : await (async () => {
+          // Cache disabled - fetch items directly without caching
+          console.log(`Cache disabled - fetching all items directly`);
+          const client = await getClient()
+          if (client) {
+            console.log(`Client initialized: ${client.isInitialized()}`);
+          }
+          
+          const items = await getFeedItemsBySchemaName(schemaName) as GraphQLItem[];
+          console.log(`Found ${items.length} feed items for schema ${schemaName}`);
+
+          // Enrich items with image metadata if enabled (even when cache is disabled)
+          let enrichedItems = items;
+          if (config.imageMetadata?.enabled) {
+            const imageService = new ArweaveImageService({
+              gateways: config.imageMetadata.gateways,
+              timeout: config.imageMetadata.timeout,
+            });
+            enrichedItems = await enrichFeedItemsWithMedia(items, imageService, cache);
+          }
+
+          return enrichedItems;
+        })();
+
+    // Generate the feed (pass cache busting parameter if provided)
+    const feedContent = await createFeed(feedItems, schemaName, format, cacheBust);
+    const contentType = getContentType(format);
+
+    // Cache the generated feed content
+    if (config.enabled) {
+      await cache.setFeedContent(schemaName, format, feedContent, contentType);
+      
+      // Get the cached content to retrieve ETag
+      const cachedContent = await cache.getFeedContent(schemaName, format);
+      const etag = cachedContent?.etag || '';
+      const lastModified = cachedContent?.lastModified || Math.floor(Date.now() / 1000);
+
+      return new Response(feedContent, {
+        status: 200,
+        headers: {
+          'Content-Type': contentType,
+          'ETag': etag,
+          'Last-Modified': new Date(lastModified * 1000).toUTCString(),
+          'Cache-Control': 'public, max-age=3600, s-maxage=3600, must-revalidate',
+          'X-Feed-Schema': schemaName,
+          'X-Feed-Format': format,
+          'X-Cache': 'MISS',
+        },
+      });
+    }
+
+    // Cache disabled - return without caching
     return new Response(feedContent, {
       status: 200,
       headers: {
-        'Content-Type': getContentType(format),
+        'Content-Type': contentType,
         'Cache-Control': 'public, max-age=3600, s-maxage=3600',
         'X-Feed-Schema': schemaName,
         'X-Feed-Format': format,
       },
-    })
+    });
   } catch (error) {
-    console.error('Feed generation error:', error)
+    console.error('Feed generation error:', error);
+    
+    // Try to serve stale cache on error if available
+    if (config.enabled) {
+      const staleContent = await cache.getFeedContent(schemaName, format);
+      if (staleContent) {
+        console.log(`Serving stale cache due to error`);
+        return new Response(staleContent.content, {
+          status: 200,
+          headers: {
+            'Content-Type': staleContent.contentType,
+            'ETag': staleContent.etag,
+            'Cache-Control': 'public, max-age=3600, s-maxage=3600, must-revalidate',
+            'X-Feed-Schema': schemaName,
+            'X-Feed-Format': format,
+            'X-Cache': 'STALE',
+            'Warning': '299 - "Cache is stale"',
+          },
+        });
+      }
+    }
+    
     return new Response(
       JSON.stringify({
         error: 'Failed to generate feed',
