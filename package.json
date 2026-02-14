@@ -46,7 +46,7 @@
   ],
   "scripts": {
     "build:client": "vite build",
-    "dev:vite": "vite",
+    "dev:vite": "bun --env-file=.env run vite",
     "preview": "vite preview",
     "typecheck": "tsc --noEmit",
     "lint": "eslint src --ext .ts",
@@ -55,8 +55,8 @@
     "clean": "rimraf dist"
   },
   "dependencies": {
-    "@seedprotocol/sdk": "link:@seedprotocol/sdk",
-    "@seedprotocol/feed": "link:@seedprotocol/feed",
+    "@seedprotocol/sdk": "0.4.7",
+    "@seedprotocol/feed": "0.4.7",
     "express": "^5.2.1",
     "feedsmith": "^2.9.0",
     "graphql": "^16.12.0",
