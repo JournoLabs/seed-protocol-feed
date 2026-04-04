@@ -55,8 +55,8 @@
     "clean": "rimraf dist"
   },
   "dependencies": {
-    "@seedprotocol/sdk": "0.4.11",
-    "@seedprotocol/feed": "0.4.11",
+    "@seedprotocol/feed": "0.4.20",
+    "@seedprotocol/sdk": "0.4.20",
     "express": "^5.2.1",
     "feedsmith": "^2.9.0",
     "graphql": "^16.12.0",

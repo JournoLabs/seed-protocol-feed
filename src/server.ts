@@ -12,6 +12,7 @@ export function createSeedProtocolFeedServer(): Express {
   app.use(express.json());
   app.use(express.urlencoded({ extended: true }));
 
+  app.get('/:schemaName/archive/:year/:month/:format', feedRoutes.getArchiveFeed);
   app.get('/:schemaName/:format', feedRoutes.getFeed);
 
   // Add more routes here as needed
@@ -19,7 +20,7 @@ export function createSeedProtocolFeedServer(): Express {
   // app.post('/api/users', userRoutes.createUser);
 
   // Error handling middleware
-  app.use((err: any, req: express.Request, res: express.Response, next: express.NextFunction) => {
+  app.use((err: any, _req: express.Request, res: express.Response, _next: express.NextFunction) => {
     console.error('API Error:', err);
     res.status(err.status || 500).json({
       error: 'Internal Server Error',
@@ -28,7 +29,7 @@ export function createSeedProtocolFeedServer(): Express {
   });
 
   // 404 handler for /api routes
-  app.use('/api', (req, res) => {
+  app.use('/api', (_req, res) => {
     res.status(404).json({ error: 'Not Found' });
   });
 
