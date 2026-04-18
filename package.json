@@ -55,8 +55,9 @@
     "clean": "rimraf dist"
   },
   "dependencies": {
-    "@seedprotocol/feed": "0.4.20",
-    "@seedprotocol/sdk": "0.4.20",
+    "@seedprotocol/feed": "link:@seedprotocol/feed",
+    "@seedprotocol/sdk": "link:@seedprotocol/sdk",
+    "cors": "^2.8.5",
     "express": "^5.2.1",
     "feedsmith": "^2.9.0",
     "graphql": "^16.12.0",
@@ -65,13 +66,16 @@
     "pluralize": "^8.0.0"
   },
   "devDependencies": {
+    "@types/cors": "^2.8.17",
     "@types/express": "^5.0.6",
     "@types/node": "^25.2.3",
     "@types/pluralize": "^0.0.33",
+    "@types/supertest": "^6.0.3",
     "eslint": "^10.0.0",
     "react": "^19.2.4",
     "react-dom": "^19.2.4",
     "rimraf": "^6.0.0",
+    "supertest": "^7.1.4",
     "typescript": "^5.5.0",
     "vite": "^7.3.1",
     "vite-plugin-node-polyfills": "^0.25.0",
