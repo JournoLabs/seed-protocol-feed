@@ -55,8 +55,8 @@
     "clean": "rimraf dist"
   },
   "dependencies": {
-    "@seedprotocol/feed": "link:@seedprotocol/feed",
-    "@seedprotocol/sdk": "link:@seedprotocol/sdk",
+    "@seedprotocol/feed": "0.4.22",
+    "@seedprotocol/sdk": "0.4.22",
     "cors": "^2.8.5",
     "express": "^5.2.1",
     "feedsmith": "^2.9.0",
