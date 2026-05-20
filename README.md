@@ -144,6 +144,34 @@ cp .env.example .env
 NGINX_SITE=your-domain.com ./deploy.sh -y
 ```
 
+**Troubleshooting: Vite build out of memory**
+
+If `build:client` fails with `JavaScript heap out of memory` during `rendering chunks`:
+
+```bash
+# deploy.sh sets NODE_OPTIONS automatically; override heap size if needed:
+BUILD_NODE_HEAP_MB=8192 ./deploy.sh -y
+
+# Or build manually:
+NODE_OPTIONS='--max-old-space-size=4096' bun run build:client
+```
+
+Production builds disable Vite source maps to reduce peak memory.
+
+**Troubleshooting: CORS from browser apps**
+
+After deploy, verify headers (replace origin as needed):
+
+```bash
+curl -sI -H "Origin: https://permapress.xyz" "https://feed.seedprotocol.io/post/rss" | grep -i access-control
+```
+
+You should see `access-control-allow-origin: *`. If not:
+
+1. Confirm the deploy restarted the Express process (PM2/tsx).
+2. Reload nginx after CORS headers are in `location @express` (`sudo nginx -t && sudo systemctl reload nginx`).
+3. Purge Cloudflare cache for `feed.seedprotocol.io` if responses were cached without CORS.
+
 **Troubleshooting: esbuild version errors**
 
 If you encounter esbuild version mismatch errors during installation:
@@ -185,6 +213,39 @@ If you prefer manual deployment or need more control:
 4. Use a process manager (PM2, systemd, etc.) to run the server
 
 See [SECURITY.md](./SECURITY.md) for detailed security best practices and considerations.
+
+### Deploying CORS and build fixes to production
+
+On your Ubuntu server (SSH into the app directory):
+
+```bash
+cd /path/to/seed-protocol-feed   # your clone path
+git pull origin main               # or your deploy branch
+bun install                        # or: npx bun@1.2.5 install
+
+# Ensure .env has NGINX_SITE=feed.seedprotocol.io (and other vars)
+./deploy.sh -y
+```
+
+What `./deploy.sh -y` does for this release:
+
+1. Installs dependencies (including `cors`).
+2. Builds the Vite client with a **4GB Node heap** and **no production source maps**.
+3. Restarts the feed server via PM2/tsx (Express CORS middleware + per-response headers).
+4. Patches nginx `location @express` with **public CORS headers** if missing, then offers to reload nginx.
+
+After deploy:
+
+```bash
+# On the server — origin should see Access-Control-Allow-Origin: *
+curl -sI -H "Origin: https://permapress.xyz" "https://feed.seedprotocol.io/post/rss" | grep -i access-control
+
+# If you use Cloudflare: purge cache for the feed URL or whole zone
+```
+
+Then hard-refresh `https://permapress.xyz` and confirm the network feed loads.
+
+If nginx was never auto-patched, merge `location @express` from [nginx.example.conf](./nginx.example.conf) into `/etc/nginx/sites-available/<NGINX_SITE>`, then `sudo nginx -t && sudo systemctl reload nginx`.
 
 ## License
 

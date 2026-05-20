@@ -96,7 +96,8 @@ export default defineConfig({
   build: {
     outDir: 'dist/client',
     emptyOutDir: true,
-    sourcemap: true,
+    // Source maps roughly double peak memory during "rendering chunks"; disable for prod deploys.
+    sourcemap: false,
   },
   resolve: {
     alias: {

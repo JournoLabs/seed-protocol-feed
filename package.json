@@ -45,7 +45,7 @@
     "LICENSE"
   ],
   "scripts": {
-    "build:client": "vite build",
+    "build:client": "NODE_OPTIONS='--max-old-space-size=4096' vite build",
     "dev:vite": "bun --env-file=.env run vite",
     "preview": "vite preview",
     "typecheck": "tsc --noEmit",

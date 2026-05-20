@@ -12,6 +12,7 @@
 # 
 # OPTIONAL ENVIRONMENT VARIABLES:
 #   SERVER_PORT - Port for the Express server (default: 3000)
+#   BUILD_NODE_HEAP_MB - Node heap MB for Vite client build (default: 4096)
 #   APP_NAME - Application name (default: seed-protocol-feed)
 # 
 # The script will automatically load variables from a .env file if present.
@@ -342,6 +343,11 @@ install_dependencies() {
 build_application() {
     log_info "Building application..."
     cd "$APP_DIR"
+    
+    # Vite + SDK client graph can exceed Node's default ~2GB heap during chunk rendering
+    local heap_mb="${BUILD_NODE_HEAP_MB:-4096}"
+    export NODE_OPTIONS="${NODE_OPTIONS:---max-old-space-size=${heap_mb}}"
+    log_info "Using NODE_OPTIONS for client build: $NODE_OPTIONS"
     
     # Build the Vite client (static files)
     log_info "Building Vite client..."
@@ -754,8 +760,21 @@ add_feed_location() {
         try_files \$uri \$uri/ @express;
     }
     
-    # Proxy API routes to Express server
+    # Proxy feed routes to Express; public CORS for browser clients on any origin
     location @express {
+        add_header Access-Control-Allow-Origin "*" always;
+        add_header Access-Control-Allow-Methods "GET, HEAD, OPTIONS" always;
+        add_header Access-Control-Allow-Headers "If-None-Match, Accept" always;
+
+        if (\$request_method = OPTIONS) {
+            add_header Access-Control-Allow-Origin "*" always;
+            add_header Access-Control-Allow-Methods "GET, HEAD, OPTIONS" always;
+            add_header Access-Control-Allow-Headers "If-None-Match, Accept" always;
+            add_header Access-Control-Max-Age 86400 always;
+            add_header Content-Length 0;
+            return 204;
+        }
+
         proxy_pass http://localhost:$SERVER_PORT;
         proxy_http_version 1.1;
         proxy_set_header Upgrade \$http_upgrade;
@@ -886,8 +905,21 @@ PYTHON_SCRIPT
         try_files \\\$uri \\\$uri/ @express;\\
     }\\
     \\
-    # Proxy API routes to Express server\\
+    # Proxy feed routes to Express; public CORS for browser clients on any origin\\
     location @express {\\
+        add_header Access-Control-Allow-Origin \"*\" always;\\
+        add_header Access-Control-Allow-Methods \"GET, HEAD, OPTIONS\" always;\\
+        add_header Access-Control-Allow-Headers \"If-None-Match, Accept\" always;\\
+        \\
+        if (\\\$request_method = OPTIONS) {\\
+            add_header Access-Control-Allow-Origin \"*\" always;\\
+            add_header Access-Control-Allow-Methods \"GET, HEAD, OPTIONS\" always;\\
+            add_header Access-Control-Allow-Headers \"If-None-Match, Accept\" always;\\
+            add_header Access-Control-Max-Age 86400 always;\\
+            add_header Content-Length 0;\\
+            return 204;\\
+        }\\
+        \\
         proxy_pass http://localhost:$SERVER_PORT;\\
         proxy_http_version 1.1;\\
         proxy_set_header Upgrade \\\$http_upgrade;\\
@@ -911,6 +943,78 @@ PYTHON_SCRIPT
     
     log_error "Failed to add configuration automatically"
     rm -f "$feed_block_file" "$temp_file"
+    return 1
+}
+
+# Add public feed CORS headers to an existing location @express block
+ensure_nginx_cors_headers() {
+    local config_file="$1"
+
+    if [ -z "$config_file" ] || [ ! -f "$config_file" ]; then
+        return 1
+    fi
+
+    if sudo grep -q "Access-Control-Allow-Origin" "$config_file" 2>/dev/null; then
+        log_info "nginx CORS headers already present"
+        return 0
+    fi
+
+    if ! sudo grep -q "location @express" "$config_file" 2>/dev/null; then
+        log_warn "nginx has no location @express; add CORS manually (see nginx.example.conf)"
+        return 1
+    fi
+
+    log_info "Adding public feed CORS headers to nginx location @express..."
+
+    local backup_file="${config_file}.backup.cors.$(date +%Y%m%d_%H%M%S)"
+    sudo cp "$config_file" "$backup_file"
+    log_info "Created backup: $backup_file"
+
+    local cors_block_file
+    cors_block_file=$(mktemp)
+    cat > "$cors_block_file" << 'CORSEOF'
+        add_header Access-Control-Allow-Origin "*" always;
+        add_header Access-Control-Allow-Methods "GET, HEAD, OPTIONS" always;
+        add_header Access-Control-Allow-Headers "If-None-Match, Accept" always;
+
+        if ($request_method = OPTIONS) {
+            add_header Access-Control-Allow-Origin "*" always;
+            add_header Access-Control-Allow-Methods "GET, HEAD, OPTIONS" always;
+            add_header Access-Control-Allow-Headers "If-None-Match, Accept" always;
+            add_header Access-Control-Max-Age 86400 always;
+            add_header Content-Length 0;
+            return 204;
+        }
+
+CORSEOF
+
+    if command -v python3 &> /dev/null; then
+        sudo python3 << PYTHON_SCRIPT
+config_file = '$config_file'
+with open('$cors_block_file') as f:
+    cors_block = f.read()
+with open(config_file) as f:
+    content = f.read()
+if 'Access-Control-Allow-Origin' in content:
+    raise SystemExit(0)
+marker = 'location @express {'
+if marker not in content:
+    raise SystemExit(1)
+content = content.replace(marker, marker + '\n' + cors_block.rstrip() + '\n', 1)
+with open(config_file, 'w') as f:
+    f.write(content)
+print('Added CORS headers to location @express')
+PYTHON_SCRIPT
+        local result=$?
+        rm -f "$cors_block_file"
+        if [ $result -eq 0 ]; then
+            log_info "nginx CORS headers patched successfully"
+            return 0
+        fi
+    fi
+
+    rm -f "$cors_block_file"
+    log_warn "Could not patch nginx CORS automatically; copy from nginx.example.conf location @express"
     return 1
 }
 
@@ -953,6 +1057,9 @@ update_nginx_config() {
         return 1
     fi
     
+    # Patch CORS on existing configs (safe if headers already present)
+    ensure_nginx_cors_headers "$config_file" || log_warn "nginx CORS patch skipped or failed; see nginx.example.conf"
+
     # Check if root-level configuration already exists
     if has_feed_location "$config_file"; then
         log_info "Root-level static serving configuration already exists in nginx config"
@@ -998,8 +1105,21 @@ print_nginx_location_block() {
         try_files \$uri \$uri/ @express;
     }
     
-    # Proxy API routes to Express server
+    # Proxy feed routes to Express; public CORS for browser clients on any origin
     location @express {
+        add_header Access-Control-Allow-Origin "*" always;
+        add_header Access-Control-Allow-Methods "GET, HEAD, OPTIONS" always;
+        add_header Access-Control-Allow-Headers "If-None-Match, Accept" always;
+
+        if (\$request_method = OPTIONS) {
+            add_header Access-Control-Allow-Origin "*" always;
+            add_header Access-Control-Allow-Methods "GET, HEAD, OPTIONS" always;
+            add_header Access-Control-Allow-Headers "If-None-Match, Accept" always;
+            add_header Access-Control-Max-Age 86400 always;
+            add_header Content-Length 0;
+            return 204;
+        }
+
         proxy_pass http://localhost:$SERVER_PORT;
         proxy_http_version 1.1;
         proxy_set_header Upgrade \$http_upgrade;

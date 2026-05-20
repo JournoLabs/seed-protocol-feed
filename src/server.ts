@@ -1,12 +1,6 @@
-import cors from 'cors';
 import express, { type Express } from 'express';
+import { publicFeedCorsMiddleware } from './cors.js';
 import * as feedRoutes from './routes/feed';
-
-const publicFeedCors = cors({
-  origin: '*',
-  methods: ['GET', 'HEAD', 'OPTIONS'],
-  allowedHeaders: ['If-None-Match', 'Accept'],
-});
 
 /**
  * Create and configure the Express API app
@@ -18,7 +12,7 @@ export function createSeedProtocolFeedServer(): Express {
   // Middleware
   app.use(express.json());
   app.use(express.urlencoded({ extended: true }));
-  app.use(publicFeedCors);
+  app.use(publicFeedCorsMiddleware);
 
   app.get('/:schemaName/archive/:year/:month/:format', feedRoutes.getArchiveFeed);
   app.get('/:schemaName/:format', feedRoutes.getFeed);

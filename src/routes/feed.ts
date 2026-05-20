@@ -1,4 +1,5 @@
 import { handleArchiveFeedRequest, handleFeedRequest } from '@seedprotocol/feed';
+import { copyUpstreamFeedHeaders, setPublicFeedCorsHeaders } from '../cors.js';
 import type { ApiHandler } from '../types';
 
 export const getFeed: ApiHandler = async (req, res) => {
@@ -44,9 +45,10 @@ export const getFeed: ApiHandler = async (req, res) => {
 
   console.log(response.status)
 
-  res.status(response.status)
-  response.headers.forEach((value, key) => res.set(key, value))
-  
+  res.status(response.status);
+  copyUpstreamFeedHeaders(res, response);
+  setPublicFeedCorsHeaders(res);
+
   // For 304 responses, don't send body
   if (response.status === 304) {
     res.end();
@@ -88,7 +90,8 @@ export const getArchiveFeed: ApiHandler = async (req, res) => {
       cacheBust
     );
     res.status(response.status);
-    response.headers.forEach((value, key) => res.set(key, value));
+    copyUpstreamFeedHeaders(res, response);
+    setPublicFeedCorsHeaders(res);
     if (response.status === 304) {
       res.end();
     } else {
