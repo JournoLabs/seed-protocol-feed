@@ -5,7 +5,7 @@
  * This starts the Express server for handling feed API routes
  */
 
-import { initializeSeedClient, teardownSeedClient } from '@seedprotocol/feed';
+import { initializeFeedPlatform, teardownFeedPlatform } from '@seedprotocol/feed';
 import { createSeedProtocolFeedServer } from './server.js';
 
 const parsedPort = Number.parseInt(process.env.PORT ?? '', 10);
@@ -13,7 +13,7 @@ const PORT = Number.isFinite(parsedPort) ? parsedPort : 3000;
 
 async function startServer() {
   try {
-    await initializeSeedClient();
+    await initializeFeedPlatform();
     const app = createSeedProtocolFeedServer();
 
     app.listen(PORT, '127.0.0.1', () => {
@@ -28,7 +28,7 @@ async function startServer() {
 
 async function shutdown(signal: string) {
   console.log(`${signal} received, shutting down gracefully...`);
-  await teardownSeedClient();
+  await teardownFeedPlatform();
   process.exit(0);
 }
 

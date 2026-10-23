@@ -2,8 +2,7 @@ import { PluginOption } from 'vite'
 import { defineConfig } from 'vitest/config'
 import { resolve } from 'path'
 import { fileURLToPath } from 'url'
-import { seedVitePlugin } from '@seedprotocol/sdk/vite';
-import { handleFeedRequest, initializeSeedClient } from '@seedprotocol/feed';
+import { handleArchiveFeedRequest, handleFeedRequest, initializeFeedPlatform } from '@seedprotocol/feed';
 
 const __dirname = fileURLToPath(new URL('.', import.meta.url))
 
@@ -27,17 +26,7 @@ function feedPlugin(): PluginOption {
           const ifNoneMatch = req.headers['if-none-match'] as string | undefined
           const cacheBust = url.searchParams.get('v') ?? undefined
           try {
-            await initializeSeedClient()
-            const feedModule = await import('@seedprotocol/feed') as {
-              handleArchiveFeedRequest?: (a: string, b: number, c: number, d: string, e?: string | null, f?: string) => Promise<Response>;
-            }
-            const handleArchiveFeedRequest = feedModule.handleArchiveFeedRequest
-            if (typeof handleArchiveFeedRequest !== 'function') {
-              res.statusCode = 501
-              res.setHeader('Content-Type', 'application/json')
-              res.end(JSON.stringify({ error: 'Archive feeds not yet supported - requires @seedprotocol/feed update' }))
-              return
-            }
+            await initializeFeedPlatform()
             const response = await handleArchiveFeedRequest(
               collectionSegment,
               parseInt(year, 10),
@@ -68,8 +57,8 @@ function feedPlugin(): PluginOption {
         const page = pageParam ? Math.max(1, parseInt(pageParam, 10) || 1) : 1
 
         try {
-          await initializeSeedClient()
-          const response = await (handleFeedRequest as (a: string, b: string, c?: string | null, d?: string, e?: number) => Promise<Response>)(
+          await initializeFeedPlatform()
+          const response = await handleFeedRequest(
             collectionSegment,
             formatSegment,
             ifNoneMatch ?? null,
@@ -90,7 +79,6 @@ function feedPlugin(): PluginOption {
 export default defineConfig({
   base: '/',
   plugins: [
-    seedVitePlugin() as PluginOption,
     feedPlugin(),
   ],
   build: {

@@ -34,14 +34,7 @@ export const getFeed: ApiHandler = async (req, res) => {
   const pageParam = getQueryParam(req.query.page);
   const page = pageParam ? Math.max(1, parseInt(pageParam, 10) || 1) : 1;
 
-  // Page param: SDK will support as 5th arg once updated (see SDK_DEVELOPER_SUMMARY.md)
-  const response = await (handleFeedRequest as (
-    a: string,
-    b: string,
-    c?: string | null,
-    d?: string,
-    e?: number
-  ) => Promise<Response>)(String(schemaName ?? ''), String(format ?? ''), ifNoneMatch, cacheBust, page);
+  const response = await handleFeedRequest(String(schemaName ?? ''), String(format ?? ''), ifNoneMatch, cacheBust, page);
 
   console.log(response.status)
 
